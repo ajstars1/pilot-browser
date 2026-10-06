@@ -10,7 +10,7 @@ const LINE = /^(\s*)- (\S+)(?: "((?:[^"\\]|\\.)*)")?(?: \[([^\]]*)\])?(.*)$/;
  */
 export const parseSnapshotTree = (tree: string): RefLine[] => {
   const lines: RefLine[] = [];
-  for (const raw of tree.split('\n')) {
+  for (const raw of tree.split(/\r?\n/)) {
     const match = LINE.exec(raw);
     if (!match) continue;
     const [, indent = '', role = '', name = '', attrList = '', rest = ''] = match;

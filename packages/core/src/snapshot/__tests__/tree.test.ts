@@ -26,6 +26,10 @@ describe('parseSnapshotTree', () => {
     expect(email?.depth).toBe(1);
   });
 
+  it('should parse CRLF output (Windows) the same as LF', () => {
+    expect(parseSnapshotTree(fixture.replace(/\r?\n/g, '\r\n'))).toEqual(parseSnapshotTree(fixture.replace(/\r\n/g, '\n')));
+  });
+
   it('should handle escaped quotes and skip lines without refs', () => {
     const parsed = parseSnapshotTree('- heading "Say \\"hi\\"" [ref=e9]\n- generic\n- text "no ref"');
     expect(parsed).toEqual([{ ref: 'e9', role: 'heading', name: 'Say "hi"', depth: 0, attrs: [], value: '' }]);
