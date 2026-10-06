@@ -1,3 +1,4 @@
+import type { ControlState, LeaseSnapshot } from './lease/lease.js';
 import type { DriverCapabilities, Endpoint, Observation, Result } from './types.js';
 
 export type ConnectMode =
@@ -46,6 +47,15 @@ export interface BrowserDriver {
   screenshot(options?: { readonly annotate?: boolean }): Promise<Result<{ readonly png: Uint8Array; readonly width: number; readonly height: number }>>;
   /** Show what the agent is doing in the page overlay. Optional; drivers without an overlay omit it. */
   setStatus?(text: string): Promise<void>;
+  /** Current interaction lease. Drivers without handoff support always report the agent in control. */
+  control?(): Promise<LeaseSnapshot>;
+  /** Ask the user to take over for a task (login, 2FA, CAPTCHA, confirmation). Shown in the tab. */
+  requestHandoff?(message: string): Promise<Result<LeaseSnapshot>>;
+  /**
+   * Wait until the agent may act again, the user stops it, or the timeout passes.
+   * `onTick` is called about once a second while waiting (for progress reporting).
+   */
+  waitForUser?(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState>;
   /** Attach mode: detach only, never close the user's browser. */
   disconnect(): Promise<void>;
 }

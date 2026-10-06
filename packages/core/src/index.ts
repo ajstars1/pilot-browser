@@ -21,6 +21,9 @@ export {
   wslWindowsUserDataDirs,
 } from './discovery/endpoints.js';
 export type { HostInfo } from './discovery/endpoints.js';
-export { OVERLAY_SCRIPT, overlayStatusExpression } from './overlay/script.js';
+export { buildOverlayScript, overlayCall, parseOverlayDrain } from './overlay/script.js';
+export type { OverlayDrain } from './overlay/script.js';
+export { InteractionLease } from './lease/lease.js';
+export type { ControlState, LeaseSnapshot, OverlayEvent, OverlayEventType } from './lease/lease.js';
 export { createOriginPolicy } from './policy/origin.js';
 export type { OriginPolicy } from './policy/origin.js';

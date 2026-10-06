@@ -25,6 +25,8 @@ export interface DriverCapabilities {
   readonly bindings: boolean;
   readonly screencast: boolean;
   readonly fileUpload: boolean;
+  /** In-page controls let the user take over, hand back and stop (requires the overlay). */
+  readonly handoff: boolean;
 }
 
 /** One line of an accessibility snapshot that carries a ref. */
@@ -60,6 +62,10 @@ export type BrowserErrorCode =
   | 'timeout'
   | 'not_found'
   | 'tab_gone'
+  /** The user has control of the tab (took over, or is handling a handoff). Wait, don't act. */
+  | 'user_control'
+  /** The user pressed Stop. Do not continue. */
+  | 'user_stopped'
   | 'engine_error';
 
 export interface BrowserError {
