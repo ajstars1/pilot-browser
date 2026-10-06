@@ -1,0 +1,31 @@
+{
+  "name": "@pilot-browser/mcp",
+  "version": "0.0.0",
+  "description": "MCP server that lets AI agents drive your real, logged-in browser with a visible cursor and an origin allowlist.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "pilot-browser-mcp": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@pilot-browser/core": "0.0.0",
+    "@pilot-browser/driver-agent-browser": "0.0.0",
+    "zod": "^4.6.5"
+  }
+}
