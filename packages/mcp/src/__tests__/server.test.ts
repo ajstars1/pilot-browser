@@ -6,6 +6,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Action, BrowserDriver, BrowserError, ConnectMode, ControlState, Endpoint, LeaseSnapshot, Observation, Result, SessionInfo, TargetFacts } from '@pilot-browser/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPilotServer, resolveUploadPath, type PilotServerOptions } from '../server.js';
+import { defaultSettings, type Settings } from '../settings.js';
+
+/** Never read the developer's real ~/.pilot-browser/config.json in tests. */
+const isolated = (over: Partial<Settings> = {}) => async (): Promise<Settings> => ({ ...defaultSettings('/tmp/pilot-test-home'), ...over });
 
 /**
  * In-memory stand-in for a browser: a URL plus a fixed tree. It exists to test the
@@ -119,7 +123,7 @@ describe('pilot-browser MCP server', () => {
 
   const start = async (extra: Partial<PilotServerOptions> = {}): Promise<void> => {
     driver = new ScriptedDriver();
-    const server = createPilotServer({ createDriver: () => driver, discover: async () => [endpoint], ...extra });
+    const server = createPilotServer({ createDriver: () => driver, discover: async () => [endpoint], loadSettings: isolated(), ...extra });
     const [a, b] = InMemoryTransport.createLinkedPair();
     client = new Client({ name: 'test', version: '0' });
     await Promise.all([server.connect(a), client.connect(b)]);
@@ -161,7 +165,7 @@ describe('pilot-browser MCP server', () => {
   });
 
   it('should report its package version to clients', async () => {
-    expect(client.getServerVersion()).toMatchObject({ name: 'pilot-browser', version: '0.1.0' });
+    expect(client.getServerVersion()).toMatchObject({ name: 'pilot-browser', version: '0.2.0' });
   });
 
   it('should require allowedOrigins to connect', async () => {
@@ -303,7 +307,7 @@ describe('pilot-browser MCP server: approvals and guards', () => {
   let close: () => Promise<void>;
   const start = async (extra: Partial<PilotServerOptions> = {}): Promise<void> => {
     driver = new ScriptedDriver();
-    const server = createPilotServer({ createDriver: () => driver, discover: async () => [endpoint], ...extra });
+    const server = createPilotServer({ createDriver: () => driver, discover: async () => [endpoint], loadSettings: isolated(), ...extra });
     const [a, b] = InMemoryTransport.createLinkedPair();
     client = new Client({ name: 'test', version: '0' });
     await Promise.all([server.connect(a), client.connect(b)]);
@@ -372,6 +376,44 @@ describe('pilot-browser MCP server: approvals and guards', () => {
     await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://shop.example.com/verify' } });
     await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs3', ref: 'e2', text: '482913' } });
     expect(driver.approvalRequests).toEqual(['Type “482913” on shop.example.com']);
+  });
+
+  it('auto mode: submits run without asking, payments still ask', async () => {
+    await start({ loadSettings: isolated({ mode: 'auto' }) });
+    driver.facts = submitFacts('https://shop.example.com/apply');
+    expect((await click()).isError).toBeFalsy();
+    expect(driver.approvalRequests).toEqual([]);
+    driver.facts = { ...submitFacts('https://shop.example.com/pay'), text: 'Pay now' };
+    await click();
+    expect(driver.approvalRequests).toEqual(['Click “Go” on shop.example.com']);
+  });
+
+  it('auto mode: typing text copied from another site still asks', async () => {
+    await start({ loadSettings: isolated({ mode: 'auto' }) });
+    driver.pageText = 'Your code is 482913';
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://mail.example.com/inbox' } });
+    driver.pageText = '';
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://shop.example.com/verify' } });
+    await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs3', ref: 'e2', text: '482913' } });
+    expect(driver.approvalRequests).toEqual(['Type “482913” on shop.example.com']);
+  });
+
+  it('manual mode: even routine clicks and typing ask; navigation does not', async () => {
+    await start({ loadSettings: isolated({ mode: 'manual' }) });
+    driver.facts = { ...submitFacts('https://shop.example.com/search', 'get'), text: 'Search' };
+    await click();
+    await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs2', ref: 'e2', text: 'hello' } });
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://shop.example.com/other' } });
+    expect(driver.approvalRequests).toEqual(['Click “Go” on shop.example.com', 'Type “hello” on shop.example.com']);
+  });
+
+  it('should report the mode at connect and re-read settings on every connect', async () => {
+    let mode: Settings['mode'] = 'supervised';
+    await start({ loadSettings: async () => ({ ...defaultSettings('/tmp/pilot-test-home'), mode }) });
+    await client.callTool({ name: 'browser_disconnect', arguments: {} });
+    mode = 'auto';
+    const connected = await client.callTool({ name: 'browser_connect', arguments: { allowedOrigins: ['shop.example.com'] } });
+    expect(textOf(connected)).toContain('Approval mode: auto');
   });
 
   it('should skip approvals when the operator turned them off, but keep the origin policy', async () => {

@@ -8,6 +8,7 @@ import { AgentBrowserDriver, resolveAgentBrowser } from '@pilot-browser/driver-a
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FIXTURES_DIR, startFixtureServer, type FixtureServer } from '../../../../test-fixtures/server.js';
 import { createPilotServer } from '../server.js';
+import { defaultSettings } from '../settings.js';
 import { spawn } from 'node:child_process';
 
 /**
@@ -71,6 +72,8 @@ describe.skipIf(!enabled)('prompt-injection suite (compromised agent, real Chrom
     site = await startFixtureServer();
     profileRoot = await mkdtemp(path.join(os.tmpdir(), 'pilot-injection-'));
     const server = createPilotServer({
+      // Isolated from the developer's own config file; this suite tests the default (supervised) mode.
+      loadSettings: async () => ({ ...defaultSettings(profileRoot), mode: 'supervised' }),
       createDriver: () => (driver = new AgentBrowserDriver({ sessionName: `pilot-inj-${process.pid}-${Date.now()}`, leasePollMs: 200 })),
       profileRoot,
       uploadRoot: FIXTURES_DIR,

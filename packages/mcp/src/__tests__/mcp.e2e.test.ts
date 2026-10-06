@@ -29,7 +29,7 @@ describe.skipIf(!enabled)('pilot-browser-mcp over stdio (real Chrome)', () => {
   beforeAll(async () => {
     server = await startFixtureServer();
     profileRoot = await mkdtemp(path.join(os.tmpdir(), 'pilot-mcp-profiles-'));
-    const env: Record<string, string> = { ...(process.env as Record<string, string>), PILOT_PROFILE_DIR: profileRoot, PILOT_UPLOAD_DIR: FIXTURES_DIR, PILOT_APPROVALS: 'off' };
+    const env: Record<string, string> = { ...(process.env as Record<string, string>), PILOT_PROFILE_DIR: profileRoot, PILOT_UPLOAD_DIR: FIXTURES_DIR, PILOT_MODE: 'full-auto', PILOT_CONFIG: path.join(profileRoot, 'no-config.json') };
     if (chrome) env.PILOT_CHROME = chrome;
     client = new Client({ name: 'e2e', version: '0' });
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [bin], env }));

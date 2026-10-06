@@ -9,9 +9,11 @@ import {
   assessAction,
   createOriginPolicy,
   describeAction,
+  requiresApproval,
   discoverEndpoints,
   TaintTracker,
   type Action,
+  type ApprovalMode,
   type BrowserDriver,
   type BrowserError,
   type BrowserKind,
@@ -24,6 +26,7 @@ import {
 import { AgentBrowserDriver } from '@pilot-browser/driver-agent-browser';
 import { z } from 'zod';
 import { errorResult, formatObservation, text, type ToolResult } from './format.js';
+import { describeMode, loadSettings, type Settings } from './settings.js';
 
 export interface PilotServerOptions {
   readonly createDriver?: () => BrowserDriver;
@@ -35,10 +38,13 @@ export interface PilotServerOptions {
   /** Browser binary for managed mode. Default: agent-browser's choice. */
   readonly executablePath?: string;
   /**
-   * `consequential` (default): submits, purchases, sends, deletes, uploads, and typing text copied
-   * from another site wait for the user's Approve in the tab. `off`: no approvals (origin policy
-   * still applies). Set by whoever runs the server, never by the model.
+   * Operator settings (mode, upload folder, approval timeout, profile folder), re-read on every
+   * browser_connect. Default: `~/.pilot-browser/config.json` overlaid with PILOT_* env vars.
    */
+  readonly loadSettings?: () => Promise<Settings>;
+  /** Fixed approval mode, overriding the settings file. */
+  readonly mode?: ApprovalMode;
+  /** @deprecated use `mode`. `off` = `full-auto`, `consequential` = `supervised`. */
   readonly approvals?: 'consequential' | 'off';
   /** How long an approval request waits for the user. Default 120s. */
   readonly approvalTimeoutSeconds?: number;
@@ -65,7 +71,7 @@ Rules:
 - For logins, 2FA codes, CAPTCHAs or anything only the user should do, call browser_handoff. The user does it in the tab and presses Done; you then get a fresh page. Never ask the user to paste passwords or codes into the chat.
 - The user can take over at any time by clicking or typing in the tab. Then actions fail with user_control: stop acting and call browser_wait_for_user.
 - If you get user_stopped, the user pressed Stop. The session is over; do not reconnect unless the user asks.
-- Consequential actions (submitting forms, purchases, sending, deleting, uploads) pause for the user's Approve in the browser tab; the tool call waits. If you get approval_denied, do not retry that action; ask the user what they want instead.`;
+- Depending on the user's approval mode (shown at connect), some actions pause for the user's Approve in the browser tab; the tool call waits. If you get approval_denied, do not retry that action; ask the user what they want instead. You cannot change the mode; only the user can.`;
 
 const BROWSERS = ['chrome', 'brave', 'edge', 'chromium', 'chrome-canary'] as const satisfies readonly BrowserKind[];
 
@@ -95,10 +101,20 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   const server = new McpServer({ name: 'pilot-browser', version: options.version ?? PACKAGE_VERSION }, { instructions: INSTRUCTIONS });
   const createDriver = options.createDriver ?? (() => new AgentBrowserDriver());
   const discover = options.discover ?? (() => discoverEndpoints(hostInfo()));
-  const profileRoot = options.profileRoot ?? path.join(os.homedir(), '.pilot-browser', 'profiles');
 
-  const approvals = options.approvals ?? 'consequential';
-  const approvalTimeoutMs = (options.approvalTimeoutSeconds ?? 120) * 1000;
+  /** Settings file/env, with any explicit constructor options taking precedence. */
+  const resolveSettings = async (): Promise<Settings> => {
+    const base = await (options.loadSettings ?? (() => loadSettings()))();
+    const legacy: ApprovalMode | undefined = options.approvals === 'off' ? 'full-auto' : options.approvals === 'consequential' ? 'supervised' : undefined;
+    return {
+      mode: options.mode ?? legacy ?? base.mode,
+      uploadDir: options.uploadRoot ?? base.uploadDir,
+      approvalTimeoutSeconds: options.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
+      profileDir: options.profileRoot ?? base.profileDir,
+    };
+  };
+  /** Settings for the current session, fixed at connect. */
+  let settings: Settings | null = null;
 
   let driver: BrowserDriver | null = null;
   let policy: OriginPolicy | null = null;
@@ -135,6 +151,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     refNames = new Map();
     taint = new TaintTracker();
     lastUrl = 'about:blank';
+    settings = null;
   };
 
   /** Errors with what the model should do next. user_stopped ends the session. */
@@ -190,11 +207,18 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       if (!check.ok) return blocked(`This would go to ${assessment.destination}, which is outside the allowed origins. Not done. ${check.error.message}`);
     }
     const reasons = [...assessment.reasons];
+    let risk = assessment.risk;
     if (action.type === 'type') {
       const sources = taint.sourcesOf(action.text, lastUrl);
-      if (sources.length > 0) reasons.push(`it types text that was read on ${sources.join(', ')}`);
+      if (sources.length > 0) {
+        reasons.push(`it types text that was read on ${sources.join(', ')}`);
+        risk = 'high';
+      }
     }
-    if (reasons.length === 0 || approvals === 'off') return null;
+    const mode = settings?.mode ?? 'supervised';
+    if (!requiresApproval(mode, risk, action)) return null;
+    const approvalTimeoutMs = (settings?.approvalTimeoutSeconds ?? 120) * 1000;
+    if (reasons.length === 0) reasons.push(`manual mode approves every action`);
 
     const summary = describeAction(action, ctx);
     if (action.type === 'dialog') {
@@ -259,6 +283,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     },
     serialized(async (args) => {
       if (driver) return errorResult({ code: 'engine_error', message: 'Already connected. Call browser_disconnect first.', retryable: false });
+      const nextSettings = await resolveSettings();
       const nextPolicy = createOriginPolicy(args.allowedOrigins);
       const next = createDriver();
       let result;
@@ -274,7 +299,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
         }
         result = await next.connect({ kind: 'attach', endpoint });
       } else {
-        const profileDir = path.join(profileRoot, args.profile);
+        const profileDir = path.join(nextSettings.profileDir, args.profile);
         await mkdir(profileDir, { recursive: true });
         result = await next.connect({
           kind: 'managed',
@@ -286,9 +311,12 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       if (!result.ok) return errorResult(result.error);
       driver = next;
       policy = nextPolicy;
+      settings = nextSettings;
       return text(
         `Connected (${args.mode}) to ${result.value.browserVersion}. Working in the agent's own tab ${result.value.tabId}.\n` +
-          `Allowed origins: ${nextPolicy.entries.join(', ')}.\nNext: browser_navigate to a URL, then act on refs from the returned page.`,
+          `Allowed origins: ${nextPolicy.entries.join(', ')}.\n` +
+          `Approval mode: ${nextSettings.mode} (${describeMode(nextSettings.mode)}). Uploads: ${nextSettings.uploadDir ? 'allowed from the configured folder' : 'disabled'}.\n` +
+          'Next: browser_navigate to a URL, then act on refs from the returned page.',
       );
     }),
   );
@@ -427,15 +455,18 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     'browser_upload',
     {
       title: 'Upload files',
-      description: 'Attach files to a file input. Only files inside the configured upload folder (PILOT_UPLOAD_DIR) are allowed; pass paths relative to it.',
+      description: 'Attach files to a file input. Only files inside the user-configured upload folder are allowed; pass paths relative to it.',
       inputSchema: { observationId, ref, paths: z.array(z.string()).min(1).max(10) },
       annotations: { destructiveHint: true, openWorldHint: true },
     },
     serialized(async (a) => {
-      if (!options.uploadRoot) return blocked('Uploads are disabled. Set PILOT_UPLOAD_DIR to a folder of files the agent may upload.');
+      const uploadRoot = settings?.uploadDir;
+      if (!uploadRoot) {
+        return blocked('Uploads are disabled. The user can allow a folder with `npx @pilot-browser/mcp config set uploadDir <folder>` (applies on the next browser_connect).');
+      }
       const files: string[] = [];
       for (const requested of a.paths) {
-        const resolved = await resolveUploadPath(options.uploadRoot, requested);
+        const resolved = await resolveUploadPath(uploadRoot, requested);
         if (!resolved) return blocked(`"${requested}" is not a file inside the upload folder.`);
         files.push(resolved);
       }

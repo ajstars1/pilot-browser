@@ -1,6 +1,6 @@
 {
   "name": "@pilot-browser/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server that lets AI agents drive your real, logged-in browser: visible cursor, takeover, handoff, approvals, origin allowlist.",
   "keywords": [
     "mcp",
@@ -53,8 +53,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "@pilot-browser/core": "0.1.0",
-    "@pilot-browser/driver-agent-browser": "0.1.0",
+    "@pilot-browser/core": "0.2.0",
+    "@pilot-browser/driver-agent-browser": "0.2.0",
     "zod": "^4.6.5"
   }
 }
