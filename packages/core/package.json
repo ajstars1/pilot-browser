@@ -1,0 +1,22 @@
+{
+  "name": "@pilot-browser/core",
+  "version": "0.0.0",
+  "description": "Engine-neutral driver contract, endpoint discovery and snapshot parsing for pilot-browser.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}
