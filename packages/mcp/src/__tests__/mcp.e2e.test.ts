@@ -80,6 +80,20 @@ describe.skipIf(!enabled)('pilot-browser-mcp over stdio (real Chrome)', () => {
     const image = (shot.content as { type: string; data?: string }[]).find((c) => c.type === 'image');
     expect(image?.data?.length ?? 0).toBeGreaterThan(1000);
 
+    // A real handoff through the server: nobody presses Done, so it reports that it's still
+    // waiting, and the agent stays blind until the user hands back.
+    const progress: number[] = [];
+    const handoff = await client.callTool(
+      { name: 'browser_handoff', arguments: { kind: 'login', message: 'E2E: please log in', waitSeconds: 5 } },
+      undefined,
+      { timeout: 60_000, onprogress: (p) => progress.push(p.progress) },
+    );
+    expect(textOf(handoff)).toContain('Still waiting');
+    expect(progress.length).toBeGreaterThan(0);
+    const blind = await client.callTool({ name: 'browser_read_page', arguments: {} });
+    expect(textOf(blind)).toContain('user_control');
+    expect(textOf(blind)).toContain('E2E: please log in');
+
     expect(textOf(await client.callTool({ name: 'browser_disconnect', arguments: {} }))).toBe('Disconnected.');
   }, 120_000);
 });

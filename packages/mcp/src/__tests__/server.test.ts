@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { Action, BrowserDriver, ConnectMode, Endpoint, Observation, Result, SessionInfo } from '@pilot-browser/core';
+import type { Action, BrowserDriver, BrowserError, ConnectMode, ControlState, Endpoint, LeaseSnapshot, Observation, Result, SessionInfo } from '@pilot-browser/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPilotServer, resolveUploadPath, type PilotServerOptions } from '../server.js';
 
@@ -13,13 +13,19 @@ import { createPilotServer, resolveUploadPath, type PilotServerOptions } from '.
  * the e2e suites, which never use this.
  */
 class ScriptedDriver implements BrowserDriver {
-  readonly capabilities = { a11yTree: true, multiClient: true, bindings: false, screencast: false, fileUpload: true };
+  readonly capabilities = { a11yTree: true, multiClient: true, bindings: false, screencast: false, fileUpload: true, handoff: true };
   url = 'about:blank';
   /** Where the next click lands, to simulate a link that leaves the allowlist. */
   clickNavigatesTo: string | null = null;
   readonly actions: Action[] = [];
   readonly statuses: string[] = [];
   disconnected = false;
+  /** Next act() fails with this error, to simulate the user taking over or pressing Stop. */
+  failNextAct: BrowserError | null = null;
+  /** What waitForUser resolves to, and how many progress ticks it emits first. */
+  waitOutcome: ControlState = 'agent';
+  waitTicks = 0;
+  handoffMessage = '';
   private id = 0;
 
   private obs(): Observation {
@@ -43,6 +49,11 @@ class ScriptedDriver implements BrowserDriver {
     return { ok: true, value: this.obs() };
   }
   async act(observationId: string, action: Action): Promise<Result<Observation>> {
+    if (this.failNextAct) {
+      const error = this.failNextAct;
+      this.failNextAct = null;
+      return { ok: false, error };
+    }
     this.actions.push(action);
     if (action.type === 'navigate') this.url = action.url;
     if (action.type === 'click') {
@@ -60,6 +71,17 @@ class ScriptedDriver implements BrowserDriver {
   }
   async disconnect(): Promise<void> {
     this.disconnected = true;
+  }
+  async control(): Promise<LeaseSnapshot> {
+    return { state: 'agent', message: '', handbacks: 0 };
+  }
+  async requestHandoff(message: string): Promise<Result<LeaseSnapshot>> {
+    this.handoffMessage = message;
+    return { ok: true, value: { state: 'handoff', message, handbacks: 0 } };
+  }
+  async waitForUser(_timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState> {
+    for (let i = 1; i <= this.waitTicks; i++) onTick?.(i * 1000);
+    return this.waitOutcome;
   }
 }
 
@@ -104,6 +126,7 @@ describe('pilot-browser MCP server', () => {
         'browser_connect',
         'browser_dialog',
         'browser_disconnect',
+        'browser_handoff',
         'browser_navigate',
         'browser_press_key',
         'browser_read_page',
@@ -112,6 +135,7 @@ describe('pilot-browser MCP server', () => {
         'browser_select',
         'browser_type',
         'browser_upload',
+        'browser_wait_for_user',
       ].sort(),
     );
   });
@@ -176,6 +200,58 @@ describe('pilot-browser MCP server', () => {
     await call('browser_connect', { allowedOrigins: ['github.com'] });
     const result = await call('browser_upload', { observationId: 'obs0', ref: 'e1', paths: ['resume.pdf'] });
     expect(textOf(result)).toContain('Uploads are disabled');
+  });
+
+  it('should hand the tab to the user and return a fresh page when they press Done', async () => {
+    await call('browser_connect', { allowedOrigins: ['github.com'] });
+    await call('browser_navigate', { url: 'https://github.com/login' });
+    const result = await call('browser_handoff', { kind: 'login', message: 'Log in to GitHub, then press Done' });
+    expect(driver.handoffMessage).toBe('Log in to GitHub, then press Done');
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toMatch(/^The user handed control back[\s\S]*observationId: obs1/);
+  });
+
+  it('should report progress while waiting and say when it is still waiting', async () => {
+    await call('browser_connect', { allowedOrigins: ['github.com'] });
+    driver.waitOutcome = 'handoff';
+    driver.waitTicks = 3;
+    const progress: number[] = [];
+    const result = await client.callTool(
+      { name: 'browser_handoff', arguments: { kind: 'mfa', message: 'Enter your 2FA code', waitSeconds: 30 } },
+      undefined,
+      { onprogress: (p) => progress.push(p.progress) },
+    );
+    expect(progress).toEqual([1, 2, 3]);
+    expect(textOf(result)).toContain('Still waiting');
+    expect(textOf(result)).toContain('browser_wait_for_user');
+  });
+
+  it('should tell the model to wait when the user has taken over', async () => {
+    await call('browser_connect', { allowedOrigins: ['github.com'] });
+    await call('browser_navigate', { url: 'https://github.com/' });
+    driver.failNextAct = { code: 'user_control', message: 'The user has taken control of the tab.', retryable: true };
+    const result = await call('browser_click', { observationId: 'obs1', ref: 'e1' });
+    expect(textOf(result)).toContain('Error [user_control] (retryable)');
+    expect(textOf(result)).toContain('call browser_wait_for_user');
+    expect(driver.disconnected).toBe(false);
+  });
+
+  it('should end the session when the user presses Stop', async () => {
+    await call('browser_connect', { allowedOrigins: ['github.com'] });
+    await call('browser_navigate', { url: 'https://github.com/' });
+    driver.failNextAct = { code: 'user_stopped', message: 'The user pressed Stop.', retryable: false };
+    const result = await call('browser_click', { observationId: 'obs1', ref: 'e1' });
+    expect(textOf(result)).toContain('session has been closed');
+    expect(driver.disconnected).toBe(true);
+    expect(textOf(await call('browser_read_page'))).toContain('Not connected');
+  });
+
+  it('should end the session when the user presses Stop during a wait', async () => {
+    await call('browser_connect', { allowedOrigins: ['github.com'] });
+    driver.waitOutcome = 'stopped';
+    const result = await call('browser_wait_for_user', {});
+    expect(textOf(result)).toContain('user_stopped');
+    expect(driver.disconnected).toBe(true);
   });
 
   it('should detach from the browser on disconnect', async () => {
