@@ -1,0 +1,26 @@
+{
+  "name": "@pilot-browser/driver-agent-browser",
+  "version": "0.0.0",
+  "description": "pilot-browser driver for Chrome, Brave and Edge, built on vercel-labs/agent-browser (CDP).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pilot-browser/core": "0.0.0",
+    "agent-browser": "0.38.2"
+  }
+}
