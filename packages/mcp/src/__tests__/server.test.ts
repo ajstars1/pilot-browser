@@ -28,7 +28,10 @@ class ScriptedDriver implements BrowserDriver {
       url: this.url,
       title: 'Fake',
       tree: '- button "Go" [ref=e1]\n- textbox "Email" [ref=e2]',
-      refs: [],
+      refs: [
+        { ref: 'e1', role: 'button', name: 'Go', depth: 0, attrs: [], value: '', raw: '- button "Go" [ref=e1]' },
+        { ref: 'e2', role: 'textbox', name: 'Email', depth: 0, attrs: [], value: '', raw: '- textbox "Email" [ref=e2]' },
+      ],
       omitted: 3,
     };
   }
@@ -165,7 +168,7 @@ describe('pilot-browser MCP server', () => {
     await call('browser_connect', { allowedOrigins: ['github.com'] });
     await call('browser_navigate', { url: 'https://github.com/' });
     await call('browser_type', { observationId: 'obs1', ref: 'e2', text: 'hi', submit: true });
-    expect(driver.statuses).toEqual(['Opening github.com', 'Typing into e2', 'Submitting']);
+    expect(driver.statuses).toEqual(['Opening github.com', 'Typing into “Email”', 'Submitting']);
     expect(driver.actions.at(-1)).toEqual({ type: 'key', keys: 'Enter' });
   });
 

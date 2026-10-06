@@ -69,6 +69,12 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   let driver: BrowserDriver | null = null;
   let policy: OriginPolicy | null = null;
   let queue: Promise<unknown> = Promise.resolve();
+  /** Names of refs on the last page shown, so the status pill can say "Clicking “Go”" rather than "Clicking e2". */
+  let refNames = new Map<string, string>();
+  const label = (ref: string): string => {
+    const name = refNames.get(ref.replace(/^@/, ''));
+    return name ? `“${name.length > 40 ? `${name.slice(0, 39)}…` : name}”` : ref;
+  };
 
   const serialized = <A>(fn: (args: A) => Promise<ToolResult>) => (args: A): Promise<ToolResult> => {
     const next = queue.then(
@@ -84,6 +90,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   /** After anything that can navigate, make sure the tab is still on an allowed origin. */
   const enforceOrigin = async (result: Result<Observation>, prefix = ''): Promise<ToolResult> => {
     if (!result.ok) return errorResult(result.error);
+    refNames = new Map(result.value.refs.filter((r) => r.name).map((r) => [r.ref, r.name]));
     if (!policy || !driver) return formatObservation(result.value, prefix);
     const check = policy.check(result.value.url);
     if (check.ok) return formatObservation(result.value, prefix);
@@ -164,6 +171,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       await driver.disconnect();
       driver = null;
       policy = null;
+      refNames = new Map();
       return text('Disconnected.');
     }),
   );
@@ -221,7 +229,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     serialized(async (a) => {
       const target = a.ref !== undefined ? { ref: a.ref } : a.x !== undefined && a.y !== undefined ? { x: a.x, y: a.y } : null;
       if (!target) return errorResult({ code: 'not_found', message: 'Pass either ref, or both x and y.', retryable: false });
-      return act(a.observationId, { type: 'click', target, button: a.button, clickCount: a.clickCount }, a.ref ? `Clicking ${a.ref}` : 'Clicking');
+      return act(a.observationId, { type: 'click', target, button: a.button, clickCount: a.clickCount }, a.ref ? `Clicking ${label(a.ref)}` : 'Clicking');
     }),
   );
 
@@ -234,7 +242,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       annotations: { destructiveHint: true, openWorldHint: true },
     },
     serialized(async (a) => {
-      const typed = await act(a.observationId, { type: 'type', ref: a.ref, text: a.text, clear: a.clear }, `Typing into ${a.ref}`);
+      const typed = await act(a.observationId, { type: 'type', ref: a.ref, text: a.text, clear: a.clear }, `Typing into ${label(a.ref)}`);
       if (typed.isError || !a.submit || !driver) return typed;
       return act('', { type: 'key', keys: 'Enter' }, 'Submitting');
     }),
@@ -248,7 +256,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       inputSchema: { observationId, ref, value: z.string() },
       annotations: { destructiveHint: true },
     },
-    serialized(async (a) => act(a.observationId, { type: 'select', ref: a.ref, value: a.value }, `Choosing ${a.value}`)),
+    serialized(async (a) => act(a.observationId, { type: 'select', ref: a.ref, value: a.value }, `Choosing “${a.value}”`)),
   );
 
   server.registerTool(
@@ -300,7 +308,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
         if (!resolved) return blocked(`"${requested}" is not a file inside the upload folder.`);
         files.push(resolved);
       }
-      return act(a.observationId, { type: 'upload', ref: a.ref, files }, 'Uploading');
+      return act(a.observationId, { type: 'upload', ref: a.ref, files }, `Uploading to ${label(a.ref)}`);
     }),
   );
 
