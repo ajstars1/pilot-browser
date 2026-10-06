@@ -29,7 +29,8 @@ import { errorResult, formatObservation, text, type ToolResult } from './format.
 import { describeMode, loadSettings, type Settings } from './settings.js';
 
 export interface PilotServerOptions {
-  readonly createDriver?: () => BrowserDriver;
+  /** Called on every browser_connect with that session's settings. */
+  readonly createDriver?: (settings: Settings) => BrowserDriver;
   readonly discover?: () => Promise<Endpoint[]>;
   /** Uploads are disabled unless set; files must resolve inside this directory. */
   readonly uploadRoot?: string;
@@ -71,7 +72,9 @@ Rules:
 - For logins, 2FA codes, CAPTCHAs or anything only the user should do, call browser_handoff. The user does it in the tab and presses Done; you then get a fresh page. Never ask the user to paste passwords or codes into the chat.
 - The user can take over at any time by clicking or typing in the tab. Then actions fail with user_control: stop acting and call browser_wait_for_user.
 - If you get user_stopped, the user pressed Stop. The session is over; do not reconnect unless the user asks.
-- Depending on the user's approval mode (shown at connect), some actions pause for the user's Approve in the browser tab; the tool call waits. If you get approval_denied, do not retry that action; ask the user what they want instead. You cannot change the mode; only the user can.`;
+- Depending on the user's approval mode (shown at connect), some actions pause for the user's Approve in the browser tab; the tool call waits. If you get approval_denied, do not retry that action; ask the user what they want instead. You cannot change the mode; only the user can.
+- A page result may start with "captcha: …" when a CAPTCHA or bot check is visible. Do not try to get around it.
+- If connect says "Unattended: yes", nobody is at the browser: browser_handoff and browser_wait_for_user fail with unattended, and actions that need approval fail with approval_unavailable. Skip that task, note why, and move on.`;
 
 const BROWSERS = ['chrome', 'brave', 'edge', 'chromium', 'chrome-canary'] as const satisfies readonly BrowserKind[];
 
@@ -99,7 +102,7 @@ export const resolveUploadPath = async (root: string, requested: string): Promis
 /** Create the pilot-browser MCP server. Tool calls are serialized: one browser, one action at a time. */
 export const createPilotServer = (options: PilotServerOptions = {}): McpServer => {
   const server = new McpServer({ name: 'pilot-browser', version: options.version ?? PACKAGE_VERSION }, { instructions: INSTRUCTIONS });
-  const createDriver = options.createDriver ?? (() => new AgentBrowserDriver());
+  const createDriver = options.createDriver ?? ((s: Settings) => new AgentBrowserDriver({ inputTakeover: !s.unattended }));
   const discover = options.discover ?? (() => discoverEndpoints(hostInfo()));
 
   /** Settings file/env, with any explicit constructor options taking precedence. */
@@ -111,6 +114,8 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       uploadDir: options.uploadRoot ?? base.uploadDir,
       approvalTimeoutSeconds: options.approvalTimeoutSeconds ?? base.approvalTimeoutSeconds,
       profileDir: options.profileRoot ?? base.profileDir,
+      unattended: base.unattended,
+      identity: base.identity,
     };
   };
   /** Settings for the current session, fixed at connect. */
@@ -123,6 +128,16 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   /** The in-flight request's context (calls are serialized), for progress notifications. */
   let currentExtra: Extra | null = null;
   let queue: Promise<unknown> = Promise.resolve();
+  /**
+   * Cancels a wait for the user (handoff, approval) that is blocking the queue. Disconnect and
+   * connect fire it before queueing, so a wait the client gave up on can't hold them for minutes.
+   */
+  let waitAbort = new AbortController();
+  const waitSignal = (extra: Extra): AbortSignal => AbortSignal.any([extra.signal, waitAbort.signal]);
+  const cancelWaits = (): void => {
+    waitAbort.abort();
+    waitAbort = new AbortController();
+  };
   /** Names of refs on the last page shown, so the status pill can say "Clicking “Go”" rather than "Clicking e2". */
   let refNames = new Map<string, string>();
   const label = (ref: string): string => {
@@ -144,6 +159,14 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     );
   };
 
+  /** Run `first` immediately, before the call joins the queue. */
+  const beforeQueue =
+    <A>(first: () => void, handler: (args: A, extra: Extra) => Promise<ToolResult>) =>
+    (args: A, extra: Extra): Promise<ToolResult> => {
+      first();
+      return handler(args, extra);
+    };
+
   const endSession = async (): Promise<void> => {
     await driver?.disconnect();
     driver = null;
@@ -153,6 +176,13 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     lastUrl = 'about:blank';
     settings = null;
   };
+
+  const unattendedError = (what: string): ToolResult =>
+    errorResult({
+      code: 'unattended',
+      message: `${what} needs the user, but this is an unattended run: nobody is at the browser. Skip this task, note why, and move on to the next one.`,
+      retryable: false,
+    });
 
   /** Errors with what the model should do next. user_stopped ends the session. */
   const failure = async (error: BrowserError): Promise<ToolResult> => {
@@ -221,6 +251,13 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     if (reasons.length === 0) reasons.push(`manual mode approves every action`);
 
     const summary = describeAction(action, ctx);
+    if (settings?.unattended) {
+      return errorResult({
+        code: 'approval_unavailable',
+        message: `"${summary}" needs the user's approval (${reasons.join('; ')}), but this is an unattended run and nobody is there to give it. Not done. Skip this task, note why, and move on.`,
+        retryable: false,
+      });
+    }
     if (action.type === 'dialog') {
       return errorResult({
         code: 'needs_approval',
@@ -233,7 +270,11 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     }
     const requested = await active.requestApproval(summary);
     if (!requested.ok) return failure(requested.error);
-    const decision = await active.waitForDecision(approvalTimeoutMs, progress(approvalTimeoutMs, `Waiting for the user to approve: ${summary}`));
+    const decision = await active.waitForDecision(
+      approvalTimeoutMs,
+      progress(approvalTimeoutMs, `Waiting for the user to approve: ${summary}`),
+      currentExtra ? waitSignal(currentExtra) : waitAbort.signal,
+    );
     switch (decision) {
       case 'approved': {
         const bound = action.type !== 'key' && action.type !== 'scroll';
@@ -281,11 +322,11 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       },
       annotations: { openWorldHint: true },
     },
-    serialized(async (args) => {
+    beforeQueue(cancelWaits, serialized(async (args) => {
       if (driver) return errorResult({ code: 'engine_error', message: 'Already connected. Call browser_disconnect first.', retryable: false });
       const nextSettings = await resolveSettings();
       const nextPolicy = createOriginPolicy(args.allowedOrigins);
-      const next = createDriver();
+      const next = createDriver(nextSettings);
       let result;
       if (args.mode === 'attach') {
         const endpoints = (await discover()).filter((e) => e.engine === 'chromium' && (!args.browser || e.browser === args.browser));
@@ -312,13 +353,17 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       driver = next;
       policy = nextPolicy;
       settings = nextSettings;
+      taint = new TaintTracker({ exempt: nextSettings.identity });
       return text(
         `Connected (${args.mode}) to ${result.value.browserVersion}. Working in the agent's own tab ${result.value.tabId}.\n` +
           `Allowed origins: ${nextPolicy.entries.join(', ')}.\n` +
           `Approval mode: ${nextSettings.mode} (${describeMode(nextSettings.mode)}). Uploads: ${nextSettings.uploadDir ? 'allowed from the configured folder' : 'disabled'}.\n` +
+          (nextSettings.unattended
+            ? 'Unattended: yes. Nobody is at the browser: handoffs, waits for the user and approvals are unavailable; skip tasks that need them.\n'
+            : 'Unattended: no.\n') +
           'Next: browser_navigate to a URL, then act on refs from the returned page.',
       );
-    }),
+    })),
   );
 
   server.registerTool(
@@ -328,11 +373,11 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
       description: "End the session. In attach mode this closes only the agent's tab and detaches; the user's browser stays open.",
       inputSchema: {},
     },
-    serialized(async () => {
+    beforeQueue(cancelWaits, serialized(async () => {
       if (!driver) return text('Not connected.');
       await endSession();
       return text('Disconnected.');
-    }),
+    })),
   );
 
   server.registerTool(
@@ -491,15 +536,19 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   const waitForUser = async (active: BrowserDriver, waitSeconds: number, extra: Extra): Promise<ToolResult> => {
     if (!active.waitForUser) return errorResult({ code: 'engine_error', message: 'This browser driver has no handoff support.', retryable: false });
     const token = extra._meta?.progressToken;
-    const state = await active.waitForUser(waitSeconds * 1000, (elapsed) => {
-      if (token === undefined) return;
-      void extra
-        .sendNotification({
-          method: 'notifications/progress',
-          params: { progressToken: token, progress: Math.round(elapsed / 1000), total: waitSeconds, message: 'Waiting for the user in the browser…' },
-        })
-        .catch(() => undefined);
-    });
+    const state = await active.waitForUser(
+      waitSeconds * 1000,
+      (elapsed) => {
+        if (token === undefined) return;
+        void extra
+          .sendNotification({
+            method: 'notifications/progress',
+            params: { progressToken: token, progress: Math.round(elapsed / 1000), total: waitSeconds, message: 'Waiting for the user in the browser…' },
+          })
+          .catch(() => undefined);
+      },
+      waitSignal(extra),
+    );
     if (state === 'stopped') {
       return failure({ code: 'user_stopped', message: 'The user pressed Stop in the browser. Do not continue this task.', retryable: false });
     }
@@ -528,6 +577,7 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     },
     serialized(async (a, extra) => {
       if (!driver) return notConnected();
+      if (settings?.unattended) return unattendedError(`Handing the tab over (${a.kind}: ${a.message})`);
       if (!driver.requestHandoff) return errorResult({ code: 'engine_error', message: 'This browser driver has no handoff support.', retryable: false });
       const requested = await driver.requestHandoff(a.message);
       if (!requested.ok) return failure(requested.error);
@@ -546,6 +596,8 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     },
     serialized(async (a, extra) => {
       if (!driver) return notConnected();
+      // Nobody will hand back; fail now rather than block the run.
+      if (settings?.unattended) return unattendedError('Waiting for the user');
       return waitForUser(driver, a.waitSeconds, extra);
     }),
   );

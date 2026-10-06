@@ -14,7 +14,27 @@ describe('settings', () => {
       uploadDir: null,
       approvalTimeoutSeconds: 120,
       profileDir: path.join(home, '.pilot-browser', 'profiles'),
+      unattended: false,
+      identity: [],
     });
+  });
+
+  it('should read unattended from the file or PILOT_BROWSER_UNATTENDED, and identity values', async () => {
+    const home = await tmpHome();
+    expect((await loadSettings({ PILOT_BROWSER_UNATTENDED: '1' }, home)).unattended).toBe(true);
+    expect((await loadSettings({ PILOT_UNATTENDED: 'yes' }, home)).unattended).toBe(true);
+    await saveSetting('unattended', 'true', {}, home);
+    expect((await loadSettings({}, home)).unattended).toBe(true);
+    expect((await loadSettings({ PILOT_BROWSER_UNATTENDED: '0' }, home)).unattended).toBe(false);
+
+    await saveSetting('identity', 'Ada Lovelace; ada@example.com ;+44 20 7946 0000', {}, home);
+    expect((await loadSettings({}, home)).identity).toEqual(['Ada Lovelace', 'ada@example.com', '+44 20 7946 0000']);
+    await saveSetting('identity', '["Ada; Countess of Lovelace"]', {}, home);
+    expect((await loadSettings({}, home)).identity).toEqual(['Ada; Countess of Lovelace']);
+    expect((await loadSettings({ PILOT_IDENTITY: 'X Y;x@y.z' }, home)).identity).toEqual(['X Y', 'x@y.z']);
+    expect(parseSetting('unattended', 'maybe')).toMatchObject({ ok: false });
+    expect(parseSetting('identity', [1, 2])).toMatchObject({ ok: false });
+    expect(parseSetting('identity', 'x'.repeat(201))).toMatchObject({ ok: false });
   });
 
   it('should save, load and unset values in the config file (owner-only)', async () => {

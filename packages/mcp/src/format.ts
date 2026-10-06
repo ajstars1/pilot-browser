@@ -25,8 +25,10 @@ export const formatObservation = (obs: Observation, prefix = ''): ToolResult => 
     obs.omitted > 0
       ? `\n(${obs.omitted} more element${obs.omitted === 1 ? '' : 's'} not shown: outside the viewport or past the size limit. Scroll, or call browser_read_page with filter "all".)`
       : '';
+  // The CAPTCHA line is pilot-browser's own finding (one of a fixed set of strings), not page text.
   const body = [
     prefix,
+    obs.captcha ? `captcha: ${obs.captcha} (a human check is on the page; it was not solved)` : '',
     `observationId: ${obs.observationId}`,
     '<page_content untrusted="true">',
     `url: ${escapeUntrusted(obs.url)}`,

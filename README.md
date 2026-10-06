@@ -78,9 +78,19 @@ npx @pilot-browser/mcp config                                # show current sett
 npx @pilot-browser/mcp config set mode auto
 npx @pilot-browser/mcp config set uploadDir ~/Documents/resumes   # enables uploads from this folder only
 npx @pilot-browser/mcp config set approvalTimeoutSeconds 300
+npx @pilot-browser/mcp config set identity 'Alex Rivera;alex@example.com;+1 555 0100'   # your own details
+npx @pilot-browser/mcp config set unattended true                 # nobody at the browser (overnight runs)
 ```
 
-Settings live in `~/.pilot-browser/config.json` and are re-read on every `browser_connect`, so changes apply to the next session without restarting your MCP client. **No MCP tool can change them**, so the model can't loosen its own leash. Env vars override the file: `PILOT_MODE`, `PILOT_UPLOAD_DIR`, `PILOT_APPROVAL_TIMEOUT`, `PILOT_PROFILE_DIR`, plus `PILOT_CHROME` for the managed-mode browser binary.
+Settings live in `~/.pilot-browser/config.json` and are re-read on every `browser_connect`, so changes apply to the next session without restarting your MCP client. **No MCP tool can change them**, so the model can't loosen its own leash. Env vars override the file: `PILOT_MODE`, `PILOT_UPLOAD_DIR`, `PILOT_APPROVAL_TIMEOUT`, `PILOT_PROFILE_DIR`, `PILOT_BROWSER_UNATTENDED`, `PILOT_IDENTITY`, plus `PILOT_CHROME` for the managed-mode browser binary.
+
+**`identity`**: your own name, email, phone and profile links, as `;`-separated values or a JSON array. Typing text the agent read on another site normally needs your approval (it could be a one-time code copied out of your inbox). Your own details are exempt, so filling in your name after reading your LinkedIn profile doesn't stop and ask.
+
+**`unattended`**: for runs with nobody at the browser, such as a batch left running overnight. Use it with a managed profile (`mode: "managed"` at connect), which needs no Allow click. In an unattended session:
+- `browser_handoff` and `browser_wait_for_user` fail at once with `unattended` instead of waiting;
+- an action that needs approval in your mode fails with `approval_unavailable` instead of asking, so it is skipped, not done;
+- input in the tab doesn't pause the agent (a page moving focus can't stall the run), but **Pause** and **Stop** still work;
+- page results start with `captcha: …` when a CAPTCHA or bot check is visible, so the agent can skip that task. pilot-browser never solves CAPTCHAs.
 
 ## Supported
 

@@ -11,9 +11,14 @@ Keys:
   uploadDir               folder the agent may upload files from
   approvalTimeoutSeconds  how long an approval waits for you (5-3600)
   profileDir              where managed-mode browser profiles live
+  unattended              true for runs with nobody at the browser (overnight): no handoffs,
+                          no approval prompts, tab input doesn't pause the agent
+  identity                your own details, safe to type anywhere, e.g.
+                          'Ada Lovelace;ada@example.com;+44 20 7946 0000' or a JSON array
 
 Changes apply on the next browser_connect; no restart needed.
-Env vars (PILOT_MODE, PILOT_UPLOAD_DIR, PILOT_APPROVAL_TIMEOUT, PILOT_PROFILE_DIR) override the file.
+Env vars (PILOT_MODE, PILOT_UPLOAD_DIR, PILOT_APPROVAL_TIMEOUT, PILOT_PROFILE_DIR,
+PILOT_BROWSER_UNATTENDED, PILOT_IDENTITY) override the file.
 `;
 
 const out = (text: string): void => {
@@ -33,11 +38,14 @@ export const runConfigCommand = async (args: readonly string[]): Promise<number>
       out(`uploadDir:              ${s.uploadDir ?? '(uploads disabled)'}`);
       out(`approvalTimeoutSeconds: ${s.approvalTimeoutSeconds}`);
       out(`profileDir:             ${s.profileDir}`);
+      out(`unattended:             ${s.unattended ? 'yes (no handoffs or approval prompts)' : 'no'}`);
+      out(`identity:               ${s.identity.length > 0 ? s.identity.join('; ') : '(none)'}`);
       return 0;
     }
     if (verb === 'set' && isKey(key) && value !== undefined) {
       const saved = await saveSetting(key, value);
-      out(`${key} = ${saved ?? '(unset)'}${key === 'mode' ? `  (${describeMode(saved as (typeof APPROVAL_MODES)[number])})` : ''}`);
+      const shown = Array.isArray(saved) ? (saved.length > 0 ? saved.join('; ') : '(none)') : String(saved ?? '(unset)');
+      out(`${key} = ${shown}${key === 'mode' ? `  (${describeMode(saved as (typeof APPROVAL_MODES)[number])})` : ''}`);
       out('Applies on the next browser_connect.');
       return 0;
     }

@@ -17,6 +17,14 @@ describe('formatObservation', () => {
     expect(text.split('<page_content untrusted="true">')[0]).toBe('observationId: abc\n');
   });
 
+  it('should report a visible CAPTCHA outside the untrusted block', () => {
+    const out = formatObservation({ observationId: 'abc', url: 'https://x.example/', title: 't', tree: '', refs: [], omitted: 0, captcha: 'recaptcha challenge visible' });
+    const text = (out.content[0] as { text: string }).text;
+    expect(text.startsWith('captcha: recaptcha challenge visible')).toBe(true);
+    const plain = formatObservation({ observationId: 'abc', url: 'https://x.example/', title: 't', tree: '', refs: [], omitted: 0, captcha: null });
+    expect((plain.content[0] as { text: string }).text).not.toContain('captcha:');
+  });
+
   it('should escape case-insensitively', () => {
     expect(escapeUntrusted('</Page_Content>')).not.toMatch(/<\/page_content/i);
   });

@@ -39,14 +39,27 @@ pilot-browser drives a browser that may be **your real, logged-in browser**. A p
    No MCP tool can read or change the mode, so a fooled model can't switch itself to `full-auto`. The rails below apply in every mode.
 3. **Structural risk checks.** What's under a click is read from the live DOM by the overlay, using `Element.prototype.closest`, the `href`/`action`/`method` getters and so on. These builtins are captured before any page script runs, so a page can't patch them to disguise a submit button.
 4. **Cross-origin taint.** Recent page content is remembered per origin. Typing text that appears on a *different* origin, and not on the current one, needs approval.
+
+   The operator can declare their own details (`identity` in the config file, or `PILOT_IDENTITY`): name, email, phone, profile URLs. Typing one of these, or part of one (a phone number without its country code), is not treated as a cross-site copy. Only exact values the operator listed are exempt; anything else read on another origin, including longer text that merely contains them, is still tracked. Like every setting, no MCP tool can change it.
 5. **Tamper-proof user controls.** The overlay API is:
    - frozen, non-configurable, and gated by a per-session token;
    - passed the token as an argument, so it never appears in function source.
 
    Its buttons ignore clicks inside agent-input windows, so the agent can't press them. They never take focus, so they never appear in the agent's accessibility snapshot. Frames can report user input (which only pauses the agent) but can never resume or approve.
 6. **The agent is blind while you drive.** During a takeover, handoff or approval, reads and screenshots are refused. What you type never reaches the model.
-7. **Untrusted content marking.** URL, title and page tree go inside a single `<page_content untrusted="true">` block. Any `<page_content` / `</page_content` in page text is neutralized, so the page can't close the block early.
-8. **Upload jail.** Uploads are disabled unless `PILOT_UPLOAD_DIR` is set. Paths are resolved with `realpath` and must stay inside it, so `..` and symlink escapes are refused.
+
+   The overlay stays honest about who is driving:
+   - **Pages that drop it.** Some pages re-render the whole document and remove foreign nodes (Greenhouse's job boards do). The overlay puts itself back within a second, and the driver re-installs it in any document the init script didn't reach, so the controls never silently disappear.
+   - **Challenge frames.** reCAPTCHA, hCaptcha, Turnstile and Arkose frames move focus into themselves on their own. That focus change doesn't count as the user taking over. A click inside one of those frames therefore doesn't pause the agent either; use **Pause**.
+   - **Dead sessions.** The driver's lease poll doubles as a heartbeat. If it stops for 20 seconds (the agent's process died, or a session ended without closing its tab), the overlay removes itself instead of leaving buttons that do nothing. Disconnect removes it explicitly.
+7. **Unattended runs.** With `unattended` set (config file or `PILOT_BROWSER_UNATTENDED=1`), nobody is assumed to be at the browser:
+   - handoffs and waits for the user fail at once (`unattended`);
+   - actions that need approval in the current mode are refused (`approval_unavailable`), never auto-approved;
+   - input in the tab no longer takes control (any input is the page's own doing); Pause, Hand back and Stop still work.
+
+   Unattended mode removes waiting, not checks: the origin allowlist, upload folder, taint tracking and mode all still apply. Pages with a visible CAPTCHA or bot check are flagged (`captcha: …`) so the agent can skip them; pilot-browser does not solve them.
+8. **Untrusted content marking.** URL, title and page tree go inside a single `<page_content untrusted="true">` block. Any `<page_content` / `</page_content` in page text is neutralized, so the page can't close the block early.
+9. **Upload jail.** Uploads are disabled unless `PILOT_UPLOAD_DIR` is set. Paths are resolved with `realpath` and must stay inside it, so `..` and symlink escapes are refused.
 
 ## The injection suite
 

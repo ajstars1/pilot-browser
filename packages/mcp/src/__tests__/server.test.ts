@@ -29,6 +29,9 @@ class ScriptedDriver implements BrowserDriver {
   /** What waitForUser resolves to, and how many progress ticks it emits first. */
   waitOutcome: ControlState = 'agent';
   waitTicks = 0;
+  /** waitForUser blocks until its signal aborts, like a user who never comes back. */
+  waitBlocks = false;
+  waitAborted = false;
   handoffMessage = '';
   /** What describeTarget reports for the next action, and how the user answers approvals. */
   facts: TargetFacts | null = null;
@@ -103,8 +106,13 @@ class ScriptedDriver implements BrowserDriver {
   async isCurrent(): Promise<boolean> {
     return this.pageStillCurrent;
   }
-  async waitForUser(_timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState> {
+  async waitForUser(_timeoutMs: number, onTick?: (elapsedMs: number) => void, signal?: AbortSignal): Promise<ControlState> {
     for (let i = 1; i <= this.waitTicks; i++) onTick?.(i * 1000);
+    if (this.waitBlocks) {
+      await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+      this.waitAborted = true;
+      return 'handoff';
+    }
     return this.waitOutcome;
   }
 }
@@ -282,6 +290,26 @@ describe('pilot-browser MCP server', () => {
     expect(driver.disconnected).toBe(true);
   });
 
+  it('should say at connect whether the run is unattended', async () => {
+    await close();
+    await start({ loadSettings: isolated({ unattended: true }) });
+    expect(textOf(await call('browser_connect', { allowedOrigins: ['example.com'] }))).toContain('Unattended: yes');
+    await close();
+    await start();
+    expect(textOf(await call('browser_connect', { allowedOrigins: ['example.com'] }))).toContain('Unattended: no');
+  });
+
+  it('should cancel a wait for the user when disconnect is called, instead of queueing behind it', async () => {
+    await call('browser_connect', { allowedOrigins: ['example.com'] });
+    driver.waitBlocks = true;
+    const waiting = call('browser_wait_for_user', { waitSeconds: 600 });
+    await new Promise((r) => setTimeout(r, 50));
+    const disconnected = await call('browser_disconnect');
+    expect(textOf(disconnected)).toBe('Disconnected.');
+    expect(driver.waitAborted).toBe(true);
+    await waiting;
+  });
+
   it('should detach from the browser on disconnect', async () => {
     await call('browser_connect', { allowedOrigins: ['github.com'] });
     await call('browser_disconnect');
@@ -423,6 +451,45 @@ describe('pilot-browser MCP server: approvals and guards', () => {
     expect(driver.approvalRequests).toEqual([]);
     driver.facts = submitFacts('https://evil.example/collect');
     expect(textOf(await click())).toContain('outside the allowed origins');
+  });
+
+  it('should not ask before typing the user\'s declared identity, even if another site showed it', async () => {
+    await start({ loadSettings: isolated({ mode: 'auto', identity: ['Ada Lovelace', 'ada@example.com'] }) });
+    driver.pageText = 'Profile: Ada Lovelace, ada@example.com, code 482913';
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://mail.example.com/inbox' } });
+    driver.pageText = '';
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://shop.example.com/verify' } });
+    expect((await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs3', ref: 'e2', text: 'Ada Lovelace' } })).isError).toBeFalsy();
+    expect((await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs4', ref: 'e2', text: 'ada@example.com' } })).isError).toBeFalsy();
+    expect(driver.approvalRequests).toEqual([]);
+    await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs5', ref: 'e2', text: '482913' } });
+    expect(driver.approvalRequests).toEqual(['Type “482913” on shop.example.com']);
+  });
+
+  it('unattended: refuses actions that need approval instead of asking, and never hands off', async () => {
+    let seen: Settings | null = null;
+    await start({
+      loadSettings: isolated({ mode: 'auto', unattended: true }),
+      createDriver: (settings: Settings) => {
+        seen = settings;
+        return driver;
+      },
+    });
+    expect(seen).toMatchObject({ unattended: true });
+    driver.facts = { ...submitFacts('https://shop.example.com/pay'), text: 'Pay now' };
+    const paid = await click();
+    expect(paid.isError).toBe(true);
+    expect(textOf(paid)).toContain('approval_unavailable');
+    expect(driver.approvalRequests).toEqual([]);
+    expect(driver.actions.filter((a) => a.type === 'click')).toEqual([]);
+    // Routine actions still run.
+    driver.facts = submitFacts('https://shop.example.com/apply');
+    expect((await click()).isError).toBeFalsy();
+
+    const handoff = await client.callTool({ name: 'browser_handoff', arguments: { kind: 'captcha', message: 'Solve the CAPTCHA' } });
+    expect(textOf(handoff)).toContain('Error [unattended]');
+    expect(driver.handoffMessage).toBe('');
+    expect(textOf(await client.callTool({ name: 'browser_wait_for_user', arguments: {} }))).toContain('Error [unattended]');
   });
 
   it('should hand accepting a confirm dialog to the user', async () => {
