@@ -160,6 +160,10 @@ describe('pilot-browser MCP server', () => {
     );
   });
 
+  it('should report its package version to clients', async () => {
+    expect(client.getServerVersion()).toMatchObject({ name: 'pilot-browser', version: '0.1.0' });
+  });
+
   it('should require allowedOrigins to connect', async () => {
     const result = await call('browser_connect', { mode: 'attach' });
     expect(result.isError).toBe(true);

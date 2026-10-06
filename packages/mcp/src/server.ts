@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,6 +45,16 @@ export interface PilotServerOptions {
   readonly version?: string;
 }
 
+/** This package's version, reported to MCP clients. */
+const PACKAGE_VERSION = ((): string => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 const INSTRUCTIONS = `pilot-browser drives a real browser for the user.
 Workflow: browser_connect (attach to the user's running Chrome/Brave/Edge, or a managed browser) → browser_read_page → act with the observationId and refs (e12) from the latest page → browser_disconnect when done.
 Rules:
@@ -81,7 +92,7 @@ export const resolveUploadPath = async (root: string, requested: string): Promis
 
 /** Create the pilot-browser MCP server. Tool calls are serialized: one browser, one action at a time. */
 export const createPilotServer = (options: PilotServerOptions = {}): McpServer => {
-  const server = new McpServer({ name: 'pilot-browser', version: options.version ?? '0.0.0' }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: 'pilot-browser', version: options.version ?? PACKAGE_VERSION }, { instructions: INSTRUCTIONS });
   const createDriver = options.createDriver ?? (() => new AgentBrowserDriver());
   const discover = options.discover ?? (() => discoverEndpoints(hostInfo()));
   const profileRoot = options.profileRoot ?? path.join(os.homedir(), '.pilot-browser', 'profiles');
