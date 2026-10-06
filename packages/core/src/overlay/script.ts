@@ -1,4 +1,5 @@
-import type { ControlState } from '../lease/lease.js';
+import type { ControlState, OverlayEventType } from '../lease/lease.js';
+import type { TargetFacts } from '../policy/risk.js';
 
 /**
  * In-page overlay for agent-owned tabs: cursor, status pill and the user's controls
@@ -21,11 +22,24 @@ const pilotOverlay = (token: string): void => {
   const stringify = JSON.stringify;
   const freeze = Object.freeze;
   const isTop = window === window.top;
+  // Captured before page scripts run, so a page can't patch them to lie about what's under a click.
+  const getter = (proto: object, key: string): ((this: unknown) => unknown) | undefined =>
+    Object.getOwnPropertyDescriptor(proto, key)?.get as ((this: unknown) => unknown) | undefined;
+  const elementFromPoint = Document.prototype.elementFromPoint;
+  const activeElementOf = getter(Document.prototype, 'activeElement');
+  const closest = Element.prototype.closest;
+  const getAttribute = Element.prototype.getAttribute;
+  const tagNameOf = getter(Element.prototype, 'tagName');
+  const innerTextOf = getter(HTMLElement.prototype, 'innerText');
+  const anchorHref = getter(HTMLAnchorElement.prototype, 'href');
+  const formAction = getter(HTMLFormElement.prototype, 'action');
+  const formMethod = getter(HTMLFormElement.prototype, 'method');
+  const inputValue = getter(HTMLInputElement.prototype, 'value');
   const GRACE_MS = 400;
   const FAILSAFE_MS = 20_000;
 
-  type Mode = 'agent' | 'user' | 'handoff' | 'stopped';
-  type Queued = { type: 'input' | 'pause' | 'handback' | 'stop' };
+  type Mode = 'agent' | 'user' | 'handoff' | 'approval' | 'stopped';
+  type Queued = { type: 'input' | 'pause' | 'handback' | 'approve' | 'deny' | 'stop' };
   let mode: Mode = 'agent';
   let status = 'pilot-browser is controlling this tab';
   let request = '';
@@ -46,6 +60,7 @@ const pilotOverlay = (token: string): void => {
       agent: { text: status, buttons: [['pause', 'Pause'], ['stop', 'Stop']] },
       user: { text: 'You have control. pilot-browser is paused.', buttons: [['handback', 'Hand back'], ['stop', 'Stop']] },
       handoff: { text: `pilot-browser needs you: ${request}`, buttons: [['handback', 'Done, hand back'], ['stop', 'Stop']] },
+      approval: { text: `pilot-browser wants to: ${request}`, buttons: [['approve', 'Approve'], ['deny', 'Deny'], ['stop', 'Stop']] },
       stopped: { text: 'pilot-browser stopped.', buttons: [] },
     };
     const { text, buttons } = labels[mode];
@@ -57,6 +72,9 @@ const pilotOverlay = (token: string): void => {
     pill.appendChild(label);
     for (const [act, caption] of buttons) {
       const button = document.createElement('button');
+      // Never focusable: a focused element is exposed to accessibility snapshots despite aria-hidden,
+      // which would hand the agent refs to the user's own controls.
+      button.tabIndex = -1;
       button.dataset.act = act;
       button.textContent = caption;
       pill.appendChild(button);
@@ -69,7 +87,9 @@ const pilotOverlay = (token: string): void => {
     if (events.length > 100) events.shift();
     if (type === 'stop') mode = 'stopped';
     else if (type === 'handback' && (mode === 'user' || mode === 'handoff')) mode = 'agent';
-    else if ((type === 'input' || type === 'pause') && mode === 'agent') mode = 'user';
+    else if ((type === 'approve' || type === 'deny') && mode === 'approval') mode = 'agent';
+    else if (type === 'pause' && (mode === 'agent' || mode === 'approval')) mode = 'user';
+    else if (type === 'input' && mode === 'agent') mode = 'user';
     render();
   };
 
@@ -95,6 +115,9 @@ const pilotOverlay = (token: string): void => {
       ".pill::before{content:'';flex:none;width:8px;height:8px;border-radius:50%;background:#8b5cf6;animation:p 1s infinite}",
       '.pill.user::before,.pill.handoff::before{background:#f59e0b;animation:none}',
       '.pill.handoff{background:#78350ff2}',
+      '.pill.approval{background:#1e3a8af2}',
+      '.pill.approval::before{background:#60a5fa;animation:none}',
+      'button[data-act=approve]{background:#bbf7d0}',
       '.pill.stopped::before{background:#ef4444;animation:none}',
       '.pill.stopped{padding-right:12px}',
       '.label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -107,11 +130,15 @@ const pilotOverlay = (token: string): void => {
     if (isTop) {
       pill = document.createElement('div');
       root.appendChild(pill);
+      // Keep focus where it was when a button is pressed (see tabIndex above).
+      pill.addEventListener('mousedown', (event) => event.preventDefault());
       pill.addEventListener('click', (event) => {
         const target = event.target instanceof HTMLElement ? event.target : null;
         const act = target?.dataset.act;
         if (!event.isTrusted || !act || inAgentWindow()) return;
-        record(act === 'pause' ? 'pause' : act === 'handback' ? 'handback' : 'stop');
+        const events: Record<string, Queued['type']> = { pause: 'pause', handback: 'handback', approve: 'approve', deny: 'deny', stop: 'stop' };
+        const type = events[act];
+        if (type) record(type);
       });
       render();
     }
@@ -196,9 +223,9 @@ const pilotOverlay = (token: string): void => {
     },
     /** Display the driver's authoritative state (e.g. after a navigation reset this document). */
     setMode(t: string, next: string, text?: string): boolean {
-      if (t !== token || !['agent', 'user', 'handoff', 'stopped'].includes(next)) return false;
+      if (t !== token || !['agent', 'user', 'handoff', 'approval', 'stopped'].includes(next)) return false;
       mode = next as Mode;
-      if (next === 'handoff') request = typeof text === 'string' ? text : '';
+      if (next === 'handoff' || next === 'approval') request = typeof text === 'string' ? text : '';
       else if (next === 'agent' && typeof text === 'string' && text) status = text;
       mount();
       render();
@@ -209,6 +236,33 @@ const pilotOverlay = (token: string): void => {
       if (t !== token) return null;
       const out = stringify({ mode, events: events.splice(0) });
       return out;
+    },
+    /**
+     * What is really at viewport point (x, y), or the focused element when no point is given:
+     * the facts the risk check needs, read with captured builtins.
+     */
+    describe(t: string, x?: number, y?: number): string | null {
+      if (t !== token) return null;
+      const hit = typeof x === 'number' && typeof y === 'number' ? elementFromPoint.call(document, x, y) : (activeElementOf?.call(document) as Element | null);
+      if (!(hit instanceof Element)) return stringify({ tag: null, type: null, role: null, text: '', href: null, inForm: false, formMethod: null, formAction: null });
+      const el = (closest.call(hit, 'a[href],button,input,select,textarea,summary,[role],[onclick],[tabindex]') as Element | null) ?? hit;
+      const link = closest.call(el, 'a[href]') as HTMLAnchorElement | null;
+      const form = closest.call(el, 'form') as HTMLFormElement | null;
+      const tag = String(tagNameOf?.call(el) ?? '');
+      const text =
+        (el instanceof HTMLInputElement ? String(inputValue?.call(el) ?? '') : '') ||
+        (el instanceof HTMLElement ? String(innerTextOf?.call(el) ?? '') : '') ||
+        String(getAttribute.call(el, 'aria-label') ?? '');
+      return stringify({
+        tag,
+        type: getAttribute.call(el, 'type'),
+        role: getAttribute.call(el, 'role'),
+        text: text.trim().replace(/\s+/g, ' ').slice(0, 120),
+        href: link ? String(anchorHref?.call(link) ?? '') : null,
+        inForm: form !== null,
+        formMethod: form ? String(formMethod?.call(form) ?? 'get') : null,
+        formAction: form ? String(formAction?.call(form) ?? '') : null,
+      });
     },
     /** Button centres in viewport pixels, for tests that act as the user. */
     layout(t: string): string | null {
@@ -233,19 +287,19 @@ const pilotOverlay = (token: string): void => {
 /** Self-invoking overlay source for one session. The token never appears in function source. */
 export const buildOverlayScript = (token: string): string => `(${pilotOverlay.toString()})(${JSON.stringify(token)});`;
 
-type OverlayMethod = 'begin' | 'end' | 'setMode' | 'drain' | 'layout';
+type OverlayMethod = 'begin' | 'end' | 'setMode' | 'drain' | 'layout' | 'describe';
 
 /** Expression calling an overlay method; evaluates to null when the overlay isn't installed. */
-export const overlayCall = (token: string, method: OverlayMethod, ...args: string[]): string =>
+export const overlayCall = (token: string, method: OverlayMethod, ...args: (string | number)[]): string =>
   `globalThis.__pilotBrowserOverlay?.${method}(${[token, ...args].map((a) => JSON.stringify(a)).join(', ')}) ?? null`;
 
 export interface OverlayDrain {
   readonly mode: ControlState;
-  readonly events: readonly { readonly type: 'input' | 'pause' | 'handback' | 'stop' }[];
+  readonly events: readonly { readonly type: OverlayEventType }[];
 }
 
-const MODES: readonly string[] = ['agent', 'user', 'handoff', 'stopped'];
-const TYPES: readonly string[] = ['input', 'pause', 'handback', 'stop'];
+const MODES: readonly string[] = ['agent', 'user', 'handoff', 'approval', 'stopped'];
+const TYPES: readonly string[] = ['input', 'pause', 'handback', 'approve', 'deny', 'stop'];
 
 /** Parse and validate a `drain` result; page-controlled data is never trusted blindly. */
 export const parseOverlayDrain = (raw: unknown): OverlayDrain | null => {
@@ -258,6 +312,28 @@ export const parseOverlayDrain = (raw: unknown): OverlayDrain | null => {
         typeof e === 'object' && e !== null && TYPES.includes(String((e as { type?: unknown }).type)),
     );
     return { mode: data.mode as ControlState, events: events.map((e) => ({ type: e.type })) };
+  } catch {
+    return null;
+  }
+};
+
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+
+/** Parse and validate a `describe` result into TargetFacts. */
+export const parseTargetFacts = (raw: unknown): TargetFacts | null => {
+  if (typeof raw !== 'string') return null;
+  try {
+    const d = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      tag: str(d.tag),
+      type: str(d.type),
+      role: str(d.role),
+      text: str(d.text) ?? '',
+      href: str(d.href),
+      inForm: d.inForm === true,
+      formMethod: str(d.formMethod),
+      formAction: str(d.formAction),
+    };
   } catch {
     return null;
   }

@@ -66,6 +66,8 @@ export type BrowserErrorCode =
   | 'user_control'
   /** The user pressed Stop. Do not continue. */
   | 'user_stopped'
+  /** The user denied approval for this action. Do not retry it; ask the user. */
+  | 'approval_denied'
   | 'engine_error';
 
 export interface BrowserError {

@@ -1,4 +1,5 @@
 import type { ControlState, LeaseSnapshot } from './lease/lease.js';
+import type { TargetFacts } from './policy/risk.js';
 import type { DriverCapabilities, Endpoint, Observation, Result } from './types.js';
 
 export type ConnectMode =
@@ -56,6 +57,17 @@ export interface BrowserDriver {
    * `onTick` is called about once a second while waiting (for progress reporting).
    */
   waitForUser?(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState>;
+  /** What is really under an action (from the live DOM), for the risk check. Null when unknown. */
+  describeTarget?(observationId: string, action: Action): Promise<Result<TargetFacts | null>>;
+  /** Ask the user to approve one action; shows Approve / Deny in the tab. */
+  requestApproval?(summary: string): Promise<Result<LeaseSnapshot>>;
+  /**
+   * Wait for Approve / Deny. On timeout the request is withdrawn. Returns `user` if the user
+   * took over instead, `stopped` if they pressed Stop.
+   */
+  waitForDecision?(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'>;
+  /** Re-read the page and report whether it still matches this observation (binds approvals to what was shown). */
+  isCurrent?(observationId: string): Promise<boolean>;
   /** Attach mode: detach only, never close the user's browser. */
   disconnect(): Promise<void>;
 }
