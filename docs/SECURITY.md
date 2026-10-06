@@ -28,7 +28,15 @@ pilot-browser drives a browser that may be **your real, logged-in browser**. A p
    - uploads;
    - typing text read on another site.
 
-   The tool call waits. The approval is bound to the exact page: if the page changes before you answer, it's void. It is also single-use. Deny tells the model not to retry. Accepting a `confirm()`/`prompt()` dialog is always handed to the user. The operator (not the model) can set `PILOT_APPROVALS=off`.
+   The tool call waits. The approval is bound to the exact page: if the page changes before you answer, it's void. It is also single-use. Deny tells the model not to retry. Accepting a `confirm()`/`prompt()` dialog is handed to the user.
+
+   **Modes.** Risks are graded `write` (submit, upload, send, post, apply) or `high` (pay, buy, delete, transfer, destructive dialogs, cross-site copies). The operator picks a mode in `~/.pilot-browser/config.json` or `PILOT_MODE`:
+   - `manual` asks for every page-changing action;
+   - `supervised` (default) asks for `write` and `high`;
+   - `auto` asks only for `high`;
+   - `full-auto` never asks.
+
+   No MCP tool can read or change the mode, so a fooled model can't switch itself to `full-auto`. The rails below apply in every mode.
 3. **Structural risk checks.** What's under a click is read from the live DOM by the overlay, using `Element.prototype.closest`, the `href`/`action`/`method` getters and so on. These builtins are captured before any page script runs, so a page can't patch them to disguise a submit button.
 4. **Cross-origin taint.** Recent page content is remembered per origin. Typing text that appears on a *different* origin, and not on the current one, needs approval.
 5. **Tamper-proof user controls.** The overlay API is:

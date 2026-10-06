@@ -6,13 +6,15 @@
 [![npm](https://img.shields.io/npm/v/@pilot-browser/mcp)](https://www.npmjs.com/package/@pilot-browser/mcp)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-![The agent's status pill while it works](docs/images/pill-working.png)
+![pilot-browser filling a job application: the agent types, asks to upload the resume and to submit, and finishes once approved](docs/images/demo.gif)
+
+<sub>Real recording: Claude-style agent → pilot-browser MCP server → real Chrome, on a fictional job form (supervised mode). Re-record with `npm run demo:record`.</sub>
 
 Most browser agents run a fresh headless browser with none of your logins, or ship a forked browser. pilot-browser attaches to the **Chrome, Brave or Edge you already use**, through the browser's own consent prompt (Chromium 144+). The agent works in a tab of its own; you watch its cursor move and can step in at any moment.
 
 - **Your browser, your sessions:** no fork, no profile copying, no cookie export.
 - **You stay in control:** clicking in the agent's tab pauses it. The agent can't see the page while you drive, so passwords and 2FA codes you type never reach the model.
-- **Approvals:** submitting forms, paying, sending, deleting and uploading wait for **Approve** in the tab.
+- **Approvals, at the level you choose:** four modes from *ask before everything* to *never ask*. The default asks before submitting, paying, sending, deleting and uploading.
 - **Injection-resistant by construction:** an origin allowlist, destination checks from the live DOM, cross-site copy checks and tamper-proof controls hold even when the model is fooled. They're tested against a fully compromised agent on every CI run ([security model](docs/SECURITY.md)).
 - **MCP-native:** works from Claude Code, Cursor, or any MCP client.
 
@@ -37,7 +39,7 @@ The pill at the top of the agent's tab shows what it's doing.
 | | |
 |---|---|
 | ![Working](docs/images/pill-working.png) | **Working.** Press **Pause**, or just click or type in the tab, to take over. Press **Hand back** when done. **Stop** ends the session. |
-| ![Approval](docs/images/pill-approval.png) | **Approval.** Before anything consequential, nothing happens until you press **Approve**. The approval covers that exact action on that exact page, once. |
+| ![Approval](docs/images/pill-approval.png) | **Approval.** Depending on your [mode](#modes-and-settings), consequential steps wait for **Approve**. The approval covers that exact action on that exact page, once. |
 | ![Handoff](docs/images/pill-handoff.png) | **Handoff.** For logins, 2FA and CAPTCHAs the agent asks you to do it. It can't see the page until you press **Done**. |
 
 The agent can't press these buttons and the page can't fake them; see [SECURITY.md](docs/SECURITY.md).
@@ -50,7 +52,7 @@ The agent can't press these buttons and the page can't fake them; see [SECURITY.
 | `browser_navigate` | Go to a URL within the allowed origins. |
 | `browser_read_page` | Accessibility snapshot with refs, clipped to the viewport by default (`filter: "all"` for reading). |
 | `browser_click` / `browser_type` / `browser_select` / `browser_check` / `browser_press_key` / `browser_scroll` | Act on refs from the latest page, with real (trusted) input. |
-| `browser_upload` | Attach files from `PILOT_UPLOAD_DIR` only. |
+| `browser_upload` | Attach files from your configured `uploadDir` only. |
 | `browser_dialog` | Answer alert/confirm/prompt dialogs. |
 | `browser_screenshot` | Viewport PNG, optionally labelled with refs. |
 | `browser_handoff` / `browser_wait_for_user` | Ask you to do something in the tab, and wait for you. |
@@ -58,17 +60,27 @@ The agent can't press these buttons and the page can't fake them; see [SECURITY.
 
 Every action quotes the `observationId` of the page it was planned on, so the agent never clicks based on a stale page.
 
-## Configuration
+## Modes and settings
 
-| Env var | Effect |
-|---|---|
-| `PILOT_UPLOAD_DIR` | Folder the agent may upload from. Uploads are disabled when unset. |
-| `PILOT_APPROVALS` | `off` disables approval prompts (the origin allowlist still applies). Default: on. |
-| `PILOT_APPROVAL_TIMEOUT` | Seconds an approval waits for you (default 120). |
-| `PILOT_PROFILE_DIR` | Where managed-mode profiles live (default `~/.pilot-browser/profiles`). |
-| `PILOT_CHROME` | Browser binary for managed mode. |
+Pick how much the agent may do without asking:
 
-Example: `claude mcp add pilot-browser -e PILOT_UPLOAD_DIR=$HOME/pilot-uploads -- npx -y @pilot-browser/mcp`
+| Mode | Asks you before… | Good for |
+|---|---|---|
+| `manual` | every click, typing, upload and submit | First runs, sensitive sites |
+| `supervised` *(default)* | submits, uploads, sends, deletes, payments, typing data copied from another site | Everyday use |
+| `auto` | only payments/purchases, deletes, destructive dialogs, and cross-site copies | Repetitive work you trust, e.g. job applications |
+| `full-auto` | nothing | Unattended runs in a managed profile |
+
+Hard rails stay on in every mode: the origin allowlist, the upload folder, checks before clicks that would leave the allowed sites, and your Pause / Stop.
+
+```bash
+npx @pilot-browser/mcp config                                # show current settings
+npx @pilot-browser/mcp config set mode auto
+npx @pilot-browser/mcp config set uploadDir ~/Documents/resumes   # enables uploads from this folder only
+npx @pilot-browser/mcp config set approvalTimeoutSeconds 300
+```
+
+Settings live in `~/.pilot-browser/config.json` and are re-read on every `browser_connect`, so changes apply to the next session without restarting your MCP client. **No MCP tool can change them**, so the model can't loosen its own leash. Env vars override the file: `PILOT_MODE`, `PILOT_UPLOAD_DIR`, `PILOT_APPROVAL_TIMEOUT`, `PILOT_PROFILE_DIR`, plus `PILOT_CHROME` for the managed-mode browser binary.
 
 ## Supported
 

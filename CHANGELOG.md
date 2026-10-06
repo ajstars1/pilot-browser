@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 (2026-10-07)
+
+- **Approval modes:** `manual`, `supervised` (default), `auto` and `full-auto`.
+  - Risks are now graded `write` (submit, upload, send) or `high` (pay, delete, transfer, destructive dialogs, cross-site copies).
+  - `auto` lets submits and uploads run unattended and still asks for high-risk steps.
+- **Settings file** `~/.pilot-browser/config.json` with `npx @pilot-browser/mcp config [set|unset] …`.
+  - Re-read on every `browser_connect`, so no client restart is needed.
+  - Env vars still override it. `PILOT_APPROVALS=off` maps to `full-auto`.
+- **`uploadDir` can now be set in the config file,** so uploads work without re-registering the MCP server.
+- **The server now reports its real package version** to MCP clients.
+- **README demo GIF,** recorded by `npm run demo:record` against a fictional job form.
+
 ## 0.1.0 (2026-10-07)
 
 First public release.

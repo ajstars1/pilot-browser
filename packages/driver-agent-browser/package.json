@@ -1,6 +1,6 @@
 {
   "name": "@pilot-browser/driver-agent-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "pilot-browser driver for Chrome, Brave and Edge (attach to your running browser or a managed profile), built on agent-browser.",
   "keywords": [
     "browser-automation",
@@ -47,7 +47,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@pilot-browser/core": "0.1.0",
+    "@pilot-browser/core": "0.2.0",
     "agent-browser": "0.38.2"
   }
 }

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Senior AI Engineer · Acme Robotics</title>
+<style>
+  :root { --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --brand:#4f46e5; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: #f8fafc; }
+  header { background: #fff; border-bottom: 1px solid var(--line); padding: 14px 32px; display: flex; align-items: center; gap: 10px; font-weight: 700; }
+  header .logo { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg,#6366f1,#22d3ee); }
+  main { max-width: 640px; margin: 22px auto; background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 26px 30px; }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  .meta { color: var(--muted); margin: 0 0 18px; font-size: 14px; }
+  label { display: block; font-weight: 600; font-size: 14px; margin: 12px 0 5px; }
+  input[type=text], input[type=email], input[type=url], textarea { width: 100%; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; }
+  textarea { height: 64px; resize: none; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  .drop { border: 1.5px dashed #cbd5e1; border-radius: 8px; padding: 9px 12px; color: var(--muted); font-size: 14px; }
+  .toggle { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; }
+  .toggle button { border: 0; background: #fff; padding: 7px 18px; font: inherit; cursor: pointer; }
+  .toggle button[aria-pressed=true] { background: var(--ink); color: #fff; }
+  .submit { margin-top: 16px; width: 100%; padding: 11px; border: 0; border-radius: 9px; background: var(--brand); color: #fff; font: 600 15px system-ui, sans-serif; cursor: pointer; }
+  .done { text-align: center; padding: 50px 10px; }
+  .done .check { width: 56px; height: 56px; border-radius: 50%; background: #dcfce7; color: #16a34a; font-size: 30px; line-height: 56px; margin: 0 auto 12px; }
+</style>
+</head>
+<body>
+<header><span class="logo"></span>Acme Robotics · Careers</header>
+<main id="main">
+  <h1>Senior AI Engineer</h1>
+  <p class="meta">Remote · Full time · Agents team</p>
+  <form id="f" method="post" action="/apply">
+    <div class="row">
+      <div><label for="name">Full name</label><input id="name" type="text" required></div>
+      <div><label for="email">Email</label><input id="email" type="email" required></div>
+    </div>
+    <label for="li">LinkedIn</label><input id="li" type="url">
+    <label for="cv">Resume</label>
+    <div class="drop"><input id="cv" type="file" aria-label="Resume" accept=".pdf"></div>
+    <label>Authorized to work remotely?</label>
+    <div class="toggle" role="group" aria-label="Authorized to work remotely?">
+      <button type="button" aria-pressed="false" onclick="pick(this)">Yes</button><button type="button" aria-pressed="false" onclick="pick(this)">No</button>
+    </div>
+    <label for="why">Why Acme?</label><textarea id="why"></textarea>
+    <button class="submit" type="submit">Submit application</button>
+  </form>
+</main>
+<script>
+  function pick(b) { for (const x of b.parentElement.children) x.setAttribute('aria-pressed', String(x === b)); }
+  document.getElementById('f').addEventListener('submit', (e) => {
+    e.preventDefault();
+    document.getElementById('main').innerHTML =
+      '<div class="done"><div class="check">✓</div><h1>Application received</h1><p class="meta">Thanks! The Acme team will be in touch.</p></div>';
+  });
+</script>
+</body>
+</html>
