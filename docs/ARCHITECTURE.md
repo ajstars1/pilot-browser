@@ -44,7 +44,7 @@ Never use `--remote-debugging-port` on a real profile:
   - cross-origin iframe content, inlined.
 - **Every action quotes its `observationId`.** If the page has changed since, the driver returns `stale_ref` instead of clicking the wrong thing.
 - **The rendered tree is the source of truth** for names. In the spike, agent-browser's JSON ref map dropped names for role-less elements.
-- **Clip snapshots to the viewport** and report how many elements were omitted. In the spike fixture, 163 refs were emitted while only 5 interactive elements were in the viewport.
+- **Snapshots are clipped to the viewport by default** and report how many elements were omitted. In the spike fixture, 163 refs were emitted while only 5 interactive elements were in the viewport. The driver fetches every ref's box in one batched round-trip (~0.2 s for 160 refs). Main-frame boxes are viewport-relative; iframe children are frame-relative and get the iframe's offset.
 
 ## Safety model
 
@@ -93,8 +93,8 @@ If you launch it with `npx` on native Windows, wrap it:
 
 ## Roadmap
 
-1. `AgentBrowserDriver` and `@pilot-browser/mcp`, attach mode end to end.
-2. Overlay, interaction lease and human handoff.
+1. ✅ `AgentBrowserDriver` and `@pilot-browser/mcp` (attach + managed, viewport-clipped observations, origin policy, upload jail, overlay status pill).
+2. Interaction lease and human handoff (pause when the user touches the tab; `browser_handoff`).
 3. Managed mode, policy engine, injection test suite.
 4. `BidiDriver` for Firefox (managed first).
 5. Optional extension relay transport.
