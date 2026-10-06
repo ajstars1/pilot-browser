@@ -23,7 +23,8 @@ describe('settings', () => {
     await saveSetting('uploadDir', '~/resumes', {}, home);
     const file = path.join(home, '.pilot-browser', 'config.json');
     expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ mode: 'auto', uploadDir: path.join(home, 'resumes') });
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits; elsewhere the file must be owner-only.
+    if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600);
     expect(await loadSettings({}, home)).toMatchObject({ mode: 'auto', uploadDir: path.join(home, 'resumes') });
     await unsetSetting('mode', {}, home);
     expect((await loadSettings({}, home)).mode).toBe('supervised');
@@ -34,7 +35,7 @@ describe('settings', () => {
     await saveSetting('mode', 'manual', {}, home);
     expect((await loadSettings({ PILOT_MODE: 'auto' }, home)).mode).toBe('auto');
     expect((await loadSettings({ PILOT_APPROVALS: 'off' }, home)).mode).toBe('full-auto');
-    expect((await loadSettings({ PILOT_UPLOAD_DIR: '/x/y' }, home)).uploadDir).toBe('/x/y');
+    expect((await loadSettings({ PILOT_UPLOAD_DIR: '/x/y' }, home)).uploadDir).toBe(path.resolve('/x/y'));
   });
 
   it('should ignore invalid or corrupt values instead of loosening anything', async () => {
