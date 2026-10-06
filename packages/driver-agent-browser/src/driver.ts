@@ -8,6 +8,7 @@ import {
   overlayCall,
   parseOverlayDrain,
   parseSnapshotTree,
+  parseTargetFacts,
   type Action,
   type BrowserDriver,
   type BrowserError,
@@ -20,6 +21,7 @@ import {
   type RefLine,
   type Result,
   type SessionInfo,
+  type TargetFacts,
 } from '@pilot-browser/core';
 import { resolveAgentBrowser, type Invocation } from './binary.js';
 import { actionToCommands, dependsOnObservation, normalizeRef, refsOf } from './commands.js';
@@ -51,6 +53,7 @@ export interface AgentBrowserDriverOptions {
 interface Latest {
   readonly observation: Observation;
   readonly refs: ReadonlyMap<string, RefLine>;
+  readonly options: ObserveOptions;
 }
 
 const fail = <T>(error: BrowserError): Result<T> => ({ ok: false, error });
@@ -88,11 +91,15 @@ export class AgentBrowserDriver implements BrowserDriver {
   private mode: ConnectMode | null = null;
   private tabId = '';
   private latest: Latest | null = null;
+  /** Options of the last observation, kept even when `latest` is invalidated, to re-read the same way. */
+  private lastObserveOptions: ObserveOptions = {};
   private overlayFile: string | null = null;
   private pendingStatus = '';
   private chain: Promise<unknown> = Promise.resolve();
   private busy = false;
   private poller: ReturnType<typeof setTimeout> | null = null;
+  /** An open alert/confirm/prompt blocks page scripts: eval and url reads hang until it's answered. */
+  private dialog: { readonly type: string; readonly message: string } | null = null;
 
   constructor(options: AgentBrowserDriverOptions = {}) {
     this.runner = new AgentBrowserRunner(options.invocation ?? resolveAgentBrowser(), options.env);
@@ -187,7 +194,16 @@ export class AgentBrowserDriver implements BrowserDriver {
   /** Drain overlay events into the lease, then make the page show the lease's state. */
   private async pollLocked(): Promise<void> {
     if (!this.mode || !this.overlay) return;
-    const env = await this.run(['eval', overlayCall(this.token, 'drain')]);
+    if (this.dialog) {
+      await this.checkDialogLocked();
+      if (this.dialog) return;
+    }
+    const env = await this.run(['eval', overlayCall(this.token, 'drain')], 4_000);
+    if (!env.success && env.code === 'timeout') {
+      // Most likely a dialog the page opened on its own.
+      await this.checkDialogLocked();
+      return;
+    }
     const drain = env.success ? parseOverlayDrain(env.data.result) : null;
     // No overlay in this document yet (or a page we can't script): nothing to learn.
     if (!drain) return;
@@ -209,6 +225,8 @@ export class AgentBrowserDriver implements BrowserDriver {
         return { code: 'user_stopped', message: 'The user pressed Stop in the browser. Do not continue this task.', retryable: false };
       case 'handoff':
         return { code: 'user_control', message: `Waiting for the user to finish: ${message}`, retryable: true };
+      case 'approval':
+        return { code: 'needs_approval', message: `Waiting for the user to approve: ${message}`, retryable: true };
       case 'user':
         return {
           code: 'user_control',
@@ -254,6 +272,132 @@ export class AgentBrowserDriver implements BrowserDriver {
     }
   }
 
+  // -------------------------------------------------------------- dialogs
+
+  private async checkDialogLocked(): Promise<void> {
+    const status = await this.run(['dialog', 'status'], 5_000);
+    this.dialog = status.success && status.data.hasDialog === true ? { type: str(status.data.type) || 'dialog', message: str(status.data.message) } : null;
+  }
+
+  /** What the agent sees while a dialog blocks the page: the dialog, and nothing else to act on. */
+  private dialogObservationLocked(options: ObserveOptions): Observation {
+    const { type, message } = this.dialog ?? { type: 'dialog', message: '' };
+    const url = this.latest?.observation.url ?? '';
+    const tree = `- dialog (${type}) ${JSON.stringify(message)}: the page is blocked until this is answered with browser_dialog.`;
+    const observationId = createHash('sha256').update(`${this.tabId}\n${url}\ndialog\n${type}\n${message}`).digest('hex').slice(0, 12);
+    const observation: Observation = { observationId, url, title: '', tree, refs: [], omitted: 0 };
+    this.latest = { observation, refs: new Map(), options };
+    return observation;
+  }
+
+  private dialogBlocks(action: Action): BrowserError | null {
+    if (!this.dialog || action.type === 'dialog') return null;
+    return {
+      code: 'engine_error',
+      message: `A ${this.dialog.type} dialog is open (${JSON.stringify(this.dialog.message)}). Answer it with browser_dialog first.`,
+      retryable: true,
+    };
+  }
+
+  // ------------------------------------------------------------ approvals
+
+  async describeTarget(observationId: string, action: Action): Promise<Result<TargetFacts | null>> {
+    return this.exclusive(async () => {
+      if (!this.mode) return engineError('Not connected.');
+      await this.pollLocked();
+      const blocked = this.gate();
+      if (blocked) return fail(blocked);
+      if (this.dialog) await this.checkDialogLocked();
+      const dialogBlocked = this.dialogBlocks(action);
+      if (dialogBlocked) return fail(dialogBlocked);
+      if (action.type === 'dialog') {
+        const status = await this.run(['dialog', 'status']);
+        if (!status.success) return envelopeError(status);
+        if (status.data.hasDialog !== true) return { ok: true, value: null };
+        return {
+          ok: true,
+          value: {
+            tag: 'DIALOG',
+            type: null,
+            role: null,
+            text: str(status.data.message),
+            href: null,
+            inForm: false,
+            formMethod: null,
+            formAction: null,
+            dialogType: str(status.data.type) || null,
+          },
+        };
+      }
+      if (!this.overlay) return { ok: true, value: null };
+      let point: [number, number] | null = null;
+      if (action.type === 'click') {
+        if ('ref' in action.target) {
+          if (!this.latest || this.latest.observation.observationId !== observationId) {
+            return fail({ code: 'stale_ref', message: 'This observation is out of date; call read_page and use the new observationId.', retryable: true });
+          }
+          const ref = normalizeRef(action.target.ref);
+          if (!ref || !this.latest.refs.has(ref.slice(1))) return fail({ code: 'not_found', message: `Ref ${action.target.ref} is not in the latest observation.`, retryable: false });
+          // Same scroll the click itself would do, so the point we inspect is the point that gets clicked.
+          const box = await this.runner.batch(this.globalArgs, [['scrollintoview', ref], ['get', 'box', ref]], { timeoutMs: this.timeoutMs, bail: true });
+          if (!Array.isArray(box)) return envelopeError(box);
+          const r = box[1]?.result;
+          if (!r || box.some((e) => e.error !== null)) return { ok: true, value: null };
+          point = [num(r.x) + num(r.width) / 2, num(r.y) + num(r.height) / 2];
+        } else {
+          point = [action.target.x, action.target.y];
+        }
+      } else if (action.type !== 'key') {
+        return { ok: true, value: null };
+      }
+      const expr = point ? overlayCall(this.token, 'describe', point[0], point[1]) : overlayCall(this.token, 'describe');
+      const env = await this.run(['eval', expr]);
+      return { ok: true, value: env.success ? parseTargetFacts(env.data.result) : null };
+    });
+  }
+
+  async requestApproval(summary: string): Promise<Result<LeaseSnapshot>> {
+    if (!this.overlay) return engineError('Approvals need the in-page overlay, which is disabled for this driver.');
+    return this.exclusive(async () => {
+      if (!this.mode) return engineError('Not connected.');
+      await this.pollLocked();
+      if (!this.lease.requestApproval(summary)) return fail(this.gate() ?? { code: 'user_control', message: 'The user has control.', retryable: true });
+      await this.run(['eval', overlayCall(this.token, 'setMode', 'approval', summary)]);
+      await this.run(['tab', this.tabId]);
+      return { ok: true, value: this.lease.snapshot() };
+    });
+  }
+
+  async waitForDecision(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'> {
+    const started = Date.now();
+    const before = this.lease.snapshot();
+    for (;;) {
+      const now = await this.control();
+      if (now.approvals > before.approvals) return 'approved';
+      if (now.denials > before.denials) return 'denied';
+      if (now.state === 'stopped') return 'stopped';
+      if (now.state === 'user') return 'user';
+      const elapsed = Date.now() - started;
+      if (now.state !== 'approval' || elapsed >= timeoutMs) {
+        await this.exclusive(async () => {
+          if (this.lease.cancelApproval()) await this.run(['eval', overlayCall(this.token, 'setMode', 'agent', 'pilot-browser is controlling this tab')]);
+        });
+        return 'timeout';
+      }
+      onTick?.(elapsed);
+      await sleep(Math.min(this.leasePollMs, timeoutMs - elapsed));
+    }
+  }
+
+  async isCurrent(observationId: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      // Deliberately independent of `latest`: resolving an approval changes the lease, which clears it.
+      if (!this.mode) return false;
+      const fresh = await this.observeLocked(this.lastObserveOptions);
+      return fresh.ok && fresh.value.observationId === observationId;
+    });
+  }
+
   // ------------------------------------------------------------ observing
 
   async observe(options: ObserveOptions = {}): Promise<Result<Observation>> {
@@ -267,6 +411,9 @@ export class AgentBrowserDriver implements BrowserDriver {
   }
 
   private async observeLocked(options: ObserveOptions = {}): Promise<Result<Observation>> {
+    this.lastObserveOptions = options;
+    await this.checkDialogLocked();
+    if (this.dialog) return { ok: true, value: this.dialogObservationLocked(options) };
     const filter = options.filter ?? 'visible';
     const page = await this.runner.batch(
       this.globalArgs,
@@ -311,7 +458,7 @@ export class AgentBrowserDriver implements BrowserDriver {
 
     const observationId = createHash('sha256').update(`${this.tabId}\n${url}\n${fullTree}`).digest('hex').slice(0, 12);
     const observation: Observation = { observationId, url, title: str(titleEntry.result.title), tree, refs: shown, omitted };
-    this.latest = { observation, refs: new Map(lines.map((l) => [l.ref, l])) };
+    this.latest = { observation, refs: new Map(lines.map((l) => [l.ref, l])), options };
     return { ok: true, value: observation };
   }
 
@@ -323,6 +470,9 @@ export class AgentBrowserDriver implements BrowserDriver {
       await this.pollLocked();
       const blocked = this.gate();
       if (blocked) return fail(blocked);
+      if (this.dialog) await this.checkDialogLocked();
+      const dialogBlocked = this.dialogBlocks(action);
+      if (dialogBlocked) return fail(dialogBlocked);
       if (dependsOnObservation(action)) {
         if (!this.latest || this.latest.observation.observationId !== observationId) {
           return fail({ code: 'stale_ref', message: 'This observation is out of date; call read_page and use the new observationId.', retryable: true });
@@ -341,15 +491,21 @@ export class AgentBrowserDriver implements BrowserDriver {
       // Bracket the action in an agent-input window so the overlay can tell it from the user's input.
       const status = this.pendingStatus;
       this.pendingStatus = '';
-      const begin = this.overlay ? [['eval', overlayCall(this.token, 'begin', status)]] : [];
-      const end = this.overlay ? [['eval', overlayCall(this.token, 'end')]] : [];
-      const entries = await this.runner.batch(this.globalArgs, [...begin, ...commands.value, ...end], { timeoutMs: this.timeoutMs, bail: true });
+      // Page scripts are frozen while a dialog is open, so answering one can't be bracketed.
+      const bracket = this.overlay && action.type !== 'dialog';
+      const begin = bracket ? [['eval', overlayCall(this.token, 'begin', status)]] : [];
+      const end = bracket ? [['eval', overlayCall(this.token, 'end')]] : [];
+      const entries = await this.runner.batch(this.globalArgs, [...begin, ...commands.value], { timeoutMs: this.timeoutMs, bail: true });
       if (!Array.isArray(entries)) return envelopeError(entries);
-      const failed = entries.find((e) => e.error !== null);
-      if (failed) {
-        if (this.overlay) await this.run(['eval', overlayCall(this.token, 'end')]);
-        return fail(toBrowserError(failed.error));
+      if (entries.some((e) => e.result.dialogOpened === true)) {
+        // The action opened a dialog: page scripts are frozen, so don't touch the page until it's answered.
+        await this.checkDialogLocked();
+        if (this.dialog) return { ok: true, value: this.dialogObservationLocked({}) };
       }
+      if (end.length > 0) await this.runner.batch(this.globalArgs, end, { timeoutMs: 4_000 });
+      const failed = entries.find((e) => e.error !== null);
+      if (failed) return fail(toBrowserError(failed.error));
+      if (action.type === 'dialog') this.dialog = null;
       return this.observeLocked();
     });
   }
