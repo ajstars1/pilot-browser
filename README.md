@@ -42,6 +42,8 @@ On native Windows, use `node` with the full path to `bin.js` as above. On WSL wi
 | `PILOT_UPLOAD_DIR` | Folder the agent may upload files from. Uploads are disabled when unset. |
 | `PILOT_PROFILE_DIR` | Where managed-mode profiles live (default `~/.pilot-browser/profiles`). |
 | `PILOT_CHROME` | Browser binary for managed mode. |
+| `PILOT_APPROVALS` | `off` disables approval prompts (the origin allowlist still applies). Default: on. |
+| `PILOT_APPROVAL_TIMEOUT` | Seconds an approval waits for you (default 120). |
 
 ### Tools
 
@@ -50,6 +52,7 @@ On native Windows, use `node` with the full path to `bin.js` as above. On WSL wi
 - **Fresh pages only:** every action quotes the `observationId` of the page it was planned on, so the agent can't click based on a stale page.
 - **Allowed origins:** navigation is limited to the `allowedOrigins` given at connect. A click that lands elsewhere resets the tab.
 - **Untrusted content:** page text reaches the model wrapped as untrusted content.
+- **Injection-tested:** an automated suite plays a fully compromised agent against hostile pages on every CI run. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ### You stay in control
 
@@ -57,6 +60,7 @@ The pill at the top of the agent's tab shows what it is doing, with **Pause** an
 
 - **Take over any time.** Click or type in the agent's tab, or press **Pause**. The agent stops acting *and stops seeing the page*, so whatever you type (passwords, codes) never reaches the model. Press **Hand back** when you're done.
 - **Handoff.** For logins, 2FA, CAPTCHAs and confirmations the agent calls `browser_handoff`. The pill turns amber with its request. Do it in the tab and press **Done, hand back**; the agent then gets a fresh look at the page.
+- **Approve or Deny.** Before anything consequential, the pill turns blue: *"pilot-browser wants to: Click “Place order” on shop.example.com"*. Consequential means submitting a form, paying, sending, deleting, uploading, or typing something it read on another site. Nothing happens until you press **Approve**, and the approval covers exactly that action on exactly that page.
 - **Stop.** Ends the session for good. The agent is told not to continue.
 - **The agent can't press these buttons.** Clicks made by the agent are ignored by the overlay, and the page itself can't fake them.
 

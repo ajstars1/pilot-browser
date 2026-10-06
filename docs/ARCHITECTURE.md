@@ -123,6 +123,6 @@ If you launch it with `npx` on native Windows, wrap it:
 
 1. ✅ `AgentBrowserDriver` and `@pilot-browser/mcp` (attach + managed, viewport-clipped observations, origin policy, upload jail, overlay status pill).
 2. ✅ Interaction lease and human handoff (take over by touching the tab, Pause / Hand back / Stop, `browser_handoff`).
-3. Managed mode, policy engine, injection test suite.
+3. ✅ Approvals for consequential actions, destination pre-checks, cross-origin taint, prompt-injection suite ([SECURITY.md](SECURITY.md)).
 4. `BidiDriver` for Firefox (managed first).
 5. Optional extension relay transport.
