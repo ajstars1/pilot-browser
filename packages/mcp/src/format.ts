@@ -13,9 +13,12 @@ export const errorResult = (error: BrowserError): ToolResult => ({
   isError: true,
 });
 
+/** Neutralize anything in page text that could close or reopen the untrusted block. */
+export const escapeUntrusted = (value: string): string => value.replace(/<(\/?)(page_content)/gi, '<\u200b$1$2');
+
 /**
- * Render an observation for the model. Page content is wrapped in an untrusted block so the
- * model can tell the page's words apart from the user's instructions.
+ * Render an observation for the model. Everything the page controls (URL, title, tree) goes
+ * inside the untrusted block, escaped so page text can't close the block early.
  */
 export const formatObservation = (obs: Observation, prefix = ''): ToolResult => {
   const omitted =
@@ -25,10 +28,10 @@ export const formatObservation = (obs: Observation, prefix = ''): ToolResult => 
   const body = [
     prefix,
     `observationId: ${obs.observationId}`,
-    `url: ${obs.url}`,
-    `title: ${obs.title}`,
     '<page_content untrusted="true">',
-    obs.tree || '(no interactive elements in view)',
+    `url: ${escapeUntrusted(obs.url)}`,
+    `title: ${escapeUntrusted(obs.title)}`,
+    escapeUntrusted(obs.tree) || '(no interactive elements in view)',
     `</page_content>${omitted}`,
   ]
     .filter(Boolean)

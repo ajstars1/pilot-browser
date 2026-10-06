@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { Action, BrowserDriver, BrowserError, ConnectMode, ControlState, Endpoint, LeaseSnapshot, Observation, Result, SessionInfo } from '@pilot-browser/core';
+import type { Action, BrowserDriver, BrowserError, ConnectMode, ControlState, Endpoint, LeaseSnapshot, Observation, Result, SessionInfo, TargetFacts } from '@pilot-browser/core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPilotServer, resolveUploadPath, type PilotServerOptions } from '../server.js';
 
@@ -26,6 +26,13 @@ class ScriptedDriver implements BrowserDriver {
   waitOutcome: ControlState = 'agent';
   waitTicks = 0;
   handoffMessage = '';
+  /** What describeTarget reports for the next action, and how the user answers approvals. */
+  facts: TargetFacts | null = null;
+  decision: 'approved' | 'denied' | 'timeout' | 'user' | 'stopped' = 'approved';
+  pageStillCurrent = true;
+  readonly approvalRequests: string[] = [];
+  /** Text shown on the page, so taint tests can put a code on one origin. */
+  pageText = '';
   private id = 0;
 
   private obs(): Observation {
@@ -33,7 +40,7 @@ class ScriptedDriver implements BrowserDriver {
       observationId: `obs${this.id}`,
       url: this.url,
       title: 'Fake',
-      tree: '- button "Go" [ref=e1]\n- textbox "Email" [ref=e2]',
+      tree: `- button "Go" [ref=e1]\n- textbox "Email" [ref=e2]${this.pageText ? `\n- StaticText ${JSON.stringify(this.pageText)}` : ''}`,
       refs: [
         { ref: 'e1', role: 'button', name: 'Go', depth: 0, attrs: [], value: '', raw: '- button "Go" [ref=e1]' },
         { ref: 'e2', role: 'textbox', name: 'Email', depth: 0, attrs: [], value: '', raw: '- textbox "Email" [ref=e2]' },
@@ -73,11 +80,24 @@ class ScriptedDriver implements BrowserDriver {
     this.disconnected = true;
   }
   async control(): Promise<LeaseSnapshot> {
-    return { state: 'agent', message: '', handbacks: 0 };
+    return { state: 'agent', message: '', handbacks: 0, approvals: 0, denials: 0 };
   }
   async requestHandoff(message: string): Promise<Result<LeaseSnapshot>> {
     this.handoffMessage = message;
-    return { ok: true, value: { state: 'handoff', message, handbacks: 0 } };
+    return { ok: true, value: { state: 'handoff', message, handbacks: 0, approvals: 0, denials: 0 } };
+  }
+  async describeTarget(): Promise<Result<TargetFacts | null>> {
+    return { ok: true, value: this.facts };
+  }
+  async requestApproval(summary: string): Promise<Result<LeaseSnapshot>> {
+    this.approvalRequests.push(summary);
+    return { ok: true, value: { state: 'approval', message: summary, handbacks: 0, approvals: 0, denials: 0 } };
+  }
+  async waitForDecision(): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'> {
+    return this.decision;
+  }
+  async isCurrent(): Promise<boolean> {
+    return this.pageStillCurrent;
   }
   async waitForUser(_timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState> {
     for (let i = 1; i <= this.waitTicks; i++) onTick?.(i * 1000);
@@ -176,7 +196,7 @@ describe('pilot-browser MCP server', () => {
     const result = await call('browser_navigate', { url: 'https://github.com/' });
     const body = textOf(result);
     expect(body).toContain('observationId: obs1');
-    expect(body).toMatch(/<page_content untrusted="true">\n- button "Go" \[ref=e1\]/);
+    expect(body).toMatch(/<page_content untrusted="true">\nurl: https:\/\/github.com\/\ntitle: Fake\n- button "Go" \[ref=e1\]/);
     expect(body).toContain('3 more elements not shown');
   });
 
@@ -259,6 +279,112 @@ describe('pilot-browser MCP server', () => {
     await call('browser_disconnect');
     expect(driver.disconnected).toBe(true);
     expect(textOf(await call('browser_read_page'))).toContain('Not connected');
+  });
+});
+
+const submitFacts = (formAction: string, formMethod = 'post'): TargetFacts => ({
+  tag: 'BUTTON',
+  type: null,
+  role: null,
+  text: 'Continue',
+  href: null,
+  inForm: true,
+  formMethod,
+  formAction,
+});
+
+describe('pilot-browser MCP server: approvals and guards', () => {
+  let driver: ScriptedDriver;
+  let client: Client;
+  let close: () => Promise<void>;
+  const start = async (extra: Partial<PilotServerOptions> = {}): Promise<void> => {
+    driver = new ScriptedDriver();
+    const server = createPilotServer({ createDriver: () => driver, discover: async () => [endpoint], ...extra });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    client = new Client({ name: 'test', version: '0' });
+    await Promise.all([server.connect(a), client.connect(b)]);
+    close = async () => {
+      await client.close();
+      await server.close();
+    };
+    await client.callTool({ name: 'browser_connect', arguments: { allowedOrigins: ['shop.example.com', 'mail.example.com'] } });
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://shop.example.com/cart' } });
+  };
+  const click = () => client.callTool({ name: 'browser_click', arguments: { observationId: 'obs1', ref: 'e1' } });
+
+  afterEach(async () => {
+    await close();
+  });
+
+  it('should ask for approval before submitting a POST form, and act once approved', async () => {
+    await start();
+    driver.facts = submitFacts('https://shop.example.com/order');
+    const result = await click();
+    expect(result.isError).toBeFalsy();
+    expect(driver.approvalRequests).toEqual(['Click “Go” on shop.example.com']);
+    expect(driver.actions.at(-1)).toEqual({ type: 'click', target: { ref: 'e1' }, button: 'left', clickCount: 1 });
+  });
+
+  it('should not act when the user denies, and tell the model not to retry', async () => {
+    await start();
+    driver.facts = submitFacts('https://shop.example.com/order');
+    driver.decision = 'denied';
+    const before = driver.actions.length;
+    const result = await click();
+    expect(textOf(result)).toContain('Error [approval_denied]');
+    expect(textOf(result)).toContain('Do not retry');
+    expect(driver.actions.length).toBe(before);
+  });
+
+  it('should not act if the page changed while waiting for approval', async () => {
+    await start();
+    driver.facts = submitFacts('https://shop.example.com/order');
+    driver.pageStillCurrent = false;
+    const before = driver.actions.length;
+    expect(textOf(await click())).toContain('approval no longer applies');
+    expect(driver.actions.length).toBe(before);
+  });
+
+  it('should block a form that posts to another origin before asking anyone', async () => {
+    await start();
+    driver.facts = submitFacts('https://evil.example/collect');
+    const result = await click();
+    expect(textOf(result)).toContain('https://evil.example/collect, which is outside the allowed origins');
+    expect(driver.approvalRequests).toEqual([]);
+  });
+
+  it('should let routine clicks through without asking', async () => {
+    await start();
+    driver.facts = { ...submitFacts('https://shop.example.com/search', 'get'), text: 'Search' };
+    expect((await click()).isError).toBeFalsy();
+    expect(driver.approvalRequests).toEqual([]);
+  });
+
+  it('should ask before typing text that was read on another site', async () => {
+    await start();
+    driver.pageText = 'Your code is 482913';
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://mail.example.com/inbox' } });
+    driver.pageText = '';
+    await client.callTool({ name: 'browser_navigate', arguments: { url: 'https://shop.example.com/verify' } });
+    await client.callTool({ name: 'browser_type', arguments: { observationId: 'obs3', ref: 'e2', text: '482913' } });
+    expect(driver.approvalRequests).toEqual(['Type “482913” on shop.example.com']);
+  });
+
+  it('should skip approvals when the operator turned them off, but keep the origin policy', async () => {
+    await start({ approvals: 'off' });
+    driver.facts = submitFacts('https://shop.example.com/order');
+    expect((await click()).isError).toBeFalsy();
+    expect(driver.approvalRequests).toEqual([]);
+    driver.facts = submitFacts('https://evil.example/collect');
+    expect(textOf(await click())).toContain('outside the allowed origins');
+  });
+
+  it('should hand accepting a confirm dialog to the user', async () => {
+    await start();
+    driver.facts = { ...submitFacts(''), tag: 'DIALOG', inForm: false, formMethod: null, formAction: null, text: 'Delete everything?', dialogType: 'confirm' };
+    const result = await client.callTool({ name: 'browser_dialog', arguments: { accept: true } });
+    expect(textOf(result)).toContain('needs_approval');
+    expect(textOf(result)).toContain('browser_handoff');
   });
 });
 

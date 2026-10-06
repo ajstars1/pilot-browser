@@ -5,8 +5,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
+  assessAction,
   createOriginPolicy,
+  describeAction,
   discoverEndpoints,
+  TaintTracker,
   type Action,
   type BrowserDriver,
   type BrowserError,
@@ -30,6 +33,14 @@ export interface PilotServerOptions {
   readonly profileRoot?: string;
   /** Browser binary for managed mode. Default: agent-browser's choice. */
   readonly executablePath?: string;
+  /**
+   * `consequential` (default): submits, purchases, sends, deletes, uploads, and typing text copied
+   * from another site wait for the user's Approve in the tab. `off`: no approvals (origin policy
+   * still applies). Set by whoever runs the server, never by the model.
+   */
+  readonly approvals?: 'consequential' | 'off';
+  /** How long an approval request waits for the user. Default 120s. */
+  readonly approvalTimeoutSeconds?: number;
   readonly version?: string;
 }
 
@@ -42,7 +53,8 @@ Rules:
 - Stop and ask the user before submitting forms, sending messages, purchasing, or deleting anything.
 - For logins, 2FA codes, CAPTCHAs or anything only the user should do, call browser_handoff. The user does it in the tab and presses Done; you then get a fresh page. Never ask the user to paste passwords or codes into the chat.
 - The user can take over at any time by clicking or typing in the tab. Then actions fail with user_control: stop acting and call browser_wait_for_user.
-- If you get user_stopped, the user pressed Stop. The session is over; do not reconnect unless the user asks.`;
+- If you get user_stopped, the user pressed Stop. The session is over; do not reconnect unless the user asks.
+- Consequential actions (submitting forms, purchases, sending, deleting, uploads) pause for the user's Approve in the browser tab; the tool call waits. If you get approval_denied, do not retry that action; ask the user what they want instead.`;
 
 const BROWSERS = ['chrome', 'brave', 'edge', 'chromium', 'chrome-canary'] as const satisfies readonly BrowserKind[];
 
@@ -74,8 +86,15 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   const discover = options.discover ?? (() => discoverEndpoints(hostInfo()));
   const profileRoot = options.profileRoot ?? path.join(os.homedir(), '.pilot-browser', 'profiles');
 
+  const approvals = options.approvals ?? 'consequential';
+  const approvalTimeoutMs = (options.approvalTimeoutSeconds ?? 120) * 1000;
+
   let driver: BrowserDriver | null = null;
   let policy: OriginPolicy | null = null;
+  let taint = new TaintTracker();
+  let lastUrl = 'about:blank';
+  /** The in-flight request's context (calls are serialized), for progress notifications. */
+  let currentExtra: Extra | null = null;
   let queue: Promise<unknown> = Promise.resolve();
   /** Names of refs on the last page shown, so the status pill can say "Clicking “Go”" rather than "Clicking e2". */
   let refNames = new Map<string, string>();
@@ -85,10 +104,13 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   };
 
   const serialized = <A>(fn: (args: A, extra: Extra) => Promise<ToolResult>) => (args: A, extra: Extra): Promise<ToolResult> => {
-    const next = queue.then(
-      () => fn(args, extra),
-      () => fn(args, extra),
-    );
+    const run = (): Promise<ToolResult> => {
+      currentExtra = extra;
+      return fn(args, extra).finally(() => {
+        currentExtra = null;
+      });
+    };
+    const next = queue.then(run, run);
     queue = next.catch(() => undefined);
     return next.catch((error: unknown) =>
       errorResult({ code: 'engine_error', message: error instanceof Error ? error.message : String(error), retryable: false }),
@@ -100,6 +122,8 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     driver = null;
     policy = null;
     refNames = new Map();
+    taint = new TaintTracker();
+    lastUrl = 'about:blank';
   };
 
   /** Errors with what the model should do next. user_stopped ends the session. */
@@ -118,6 +142,8 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
   const enforceOrigin = async (result: Result<Observation>, prefix = ''): Promise<ToolResult> => {
     if (!result.ok) return failure(result.error);
     refNames = new Map(result.value.refs.filter((r) => r.name).map((r) => [r.ref, r.name]));
+    lastUrl = result.value.url;
+    taint.record(result.value.url, `${result.value.title}\n${result.value.tree}`);
     if (!policy || !driver) return formatObservation(result.value, prefix);
     const check = policy.check(result.value.url);
     if (check.ok) return formatObservation(result.value, prefix);
@@ -125,7 +151,77 @@ export const createPilotServer = (options: PilotServerOptions = {}): McpServer =
     return blocked(`The page went to ${result.value.url}, which is outside the allowed origins, so the tab was reset to about:blank. ${check.error.message}`);
   };
 
+  const progress = (waitMs: number, message: string) => (elapsed: number): void => {
+    const token = currentExtra?._meta?.progressToken;
+    if (token === undefined || !currentExtra) return;
+    void currentExtra
+      .sendNotification({
+        method: 'notifications/progress',
+        params: { progressToken: token, progress: Math.round(elapsed / 1000), total: Math.round(waitMs / 1000), message },
+      })
+      .catch(() => undefined);
+  };
+
+  /**
+   * Runtime checks before an action reaches the browser. The model may have been fooled by the
+   * page; these hold anyway: destination policy, cross-origin data flow, and user approval.
+   * Returns a result to send back instead of acting, or null to proceed.
+   */
+  const guard = async (active: BrowserDriver, id: string, action: Action): Promise<ToolResult | null> => {
+    const facts = active.describeTarget ? await active.describeTarget(id, action) : { ok: true as const, value: null };
+    if (!facts.ok) return failure(facts.error);
+    const refName = 'ref' in action ? refNames.get(action.ref.replace(/^@/, '')) : action.type === 'click' && 'ref' in action.target ? refNames.get(action.target.ref.replace(/^@/, '')) : undefined;
+    const ctx = { url: lastUrl, target: facts.value, ...(refName ? { refName } : {}) };
+    const assessment = assessAction(action, ctx);
+
+    if (assessment.destination && policy) {
+      const check = policy.check(assessment.destination);
+      if (!check.ok) return blocked(`This would go to ${assessment.destination}, which is outside the allowed origins. Not done. ${check.error.message}`);
+    }
+    const reasons = [...assessment.reasons];
+    if (action.type === 'type') {
+      const sources = taint.sourcesOf(action.text, lastUrl);
+      if (sources.length > 0) reasons.push(`it types text that was read on ${sources.join(', ')}`);
+    }
+    if (reasons.length === 0 || approvals === 'off') return null;
+
+    const summary = describeAction(action, ctx);
+    if (action.type === 'dialog') {
+      return errorResult({
+        code: 'needs_approval',
+        message: `A dialog is open and accepting it needs the user (${reasons.join('; ')}). Call browser_handoff so they can answer it, or dismiss it with accept: false.`,
+        retryable: false,
+      });
+    }
+    if (!active.requestApproval || !active.waitForDecision) {
+      return errorResult({ code: 'needs_approval', message: `"${summary}" needs the user's approval, but this browser driver can't ask for it.`, retryable: false });
+    }
+    const requested = await active.requestApproval(summary);
+    if (!requested.ok) return failure(requested.error);
+    const decision = await active.waitForDecision(approvalTimeoutMs, progress(approvalTimeoutMs, `Waiting for the user to approve: ${summary}`));
+    switch (decision) {
+      case 'approved': {
+        const bound = action.type !== 'key' && action.type !== 'scroll';
+        if (bound && active.isCurrent && !(await active.isCurrent(id))) {
+          return errorResult({ code: 'stale_ref', message: 'The page changed while waiting for approval, so the approval no longer applies. Read the page again; the action will need a new approval.', retryable: true });
+        }
+        return null;
+      }
+      case 'denied':
+        return errorResult({ code: 'approval_denied', message: `The user denied: ${summary}. Do not retry this; ask the user what they want instead.`, retryable: false });
+      case 'timeout':
+        return errorResult({ code: 'needs_approval', message: `No answer to "${summary}" within ${approvalTimeoutMs / 1000}s, so the request was withdrawn. Ask the user to watch the browser tab, then try again.`, retryable: true });
+      case 'user':
+        return failure({ code: 'user_control', message: 'The user took over instead of answering the approval.', retryable: true });
+      case 'stopped':
+        return failure({ code: 'user_stopped', message: 'The user pressed Stop in the browser. Do not continue this task.', retryable: false });
+    }
+  };
+
   const act = async (id: string, action: Action, status: string): Promise<ToolResult> => {
+    if (!driver) return notConnected();
+    const stop = await guard(driver, id, action);
+    if (stop) return stop;
     if (!driver) return notConnected();
     await driver.setStatus?.(status);
     return enforceOrigin(await driver.act(id, action));

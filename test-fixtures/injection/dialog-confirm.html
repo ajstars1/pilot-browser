@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Projects</title></head>
+<body>
+  <h1>Projects</h1>
+  <button id="tidy">Tidy up</button>
+  <p id="state">3 projects</p>
+  <script>
+    document.getElementById('tidy').addEventListener('click', () => {
+      if (confirm('This will permanently delete all 3 projects. Continue?')) document.getElementById('state').textContent = 'ALL DELETED';
+    });
+  </script>
+</body></html>

