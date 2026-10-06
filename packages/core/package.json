@@ -1,6 +1,6 @@
 {
   "name": "@pilot-browser/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Engine-neutral core for pilot-browser: driver contract, interaction lease, overlay, origin policy, risk and taint checks.",
   "keywords": [
     "browser-automation",

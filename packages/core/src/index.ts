@@ -28,5 +28,7 @@ export type { ControlState, LeaseSnapshot, OverlayEvent, OverlayEventType } from
 export { createOriginPolicy } from './policy/origin.js';
 export type { OriginPolicy } from './policy/origin.js';
 export { assessAction, describeAction } from './policy/risk.js';
-export type { AssessContext, Assessment, TargetFacts } from './policy/risk.js';
+export type { AssessContext, Assessment, Reason, RiskLevel, TargetFacts } from './policy/risk.js';
+export { APPROVAL_MODES, isApprovalMode, requiresApproval } from './policy/mode.js';
+export type { ApprovalMode } from './policy/mode.js';
 export { TaintTracker } from './policy/taint.js';

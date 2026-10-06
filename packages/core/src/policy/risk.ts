@@ -21,10 +21,27 @@ export interface TargetFacts {
   readonly dialogType?: string | null;
 }
 
+/**
+ * - `none`: routine (navigate within the page, fill a field, pick an option).
+ * - `write`: changes something on your behalf but is reversible or expected in a workflow
+ *   (submit a form, upload, send, post, apply).
+ * - `high`: money, destruction or data leaving its site (pay, buy, delete, transfer,
+ *   accept a destructive dialog, type text copied from another origin).
+ */
+export type RiskLevel = 'none' | 'write' | 'high';
+
+export interface Reason {
+  readonly level: Exclude<RiskLevel, 'none'>;
+  readonly text: string;
+}
+
 export interface Assessment {
-  /** Needs the user's explicit approval before it runs. */
+  /** Needs the user's explicit approval before it runs (in the default supervised mode). */
   readonly consequential: boolean;
+  /** The highest level among the reasons. */
+  readonly risk: RiskLevel;
   readonly reasons: readonly string[];
+  readonly details: readonly Reason[];
   /** Where the action would send the user or their data, when known before acting. */
   readonly destination: string | null;
 }
@@ -41,8 +58,9 @@ export interface AssessContext {
  * "accept", "ok", "save draft", "continue" or "next": cookie banners and wizards would make
  * approvals constant noise, and people stop reading prompts they see too often.
  */
-const RISK_WORDS =
-  /\b(buy|purchase|pay|payment|checkout|check out|place (?:my |your )?order|order now|confirm (?:order|purchase|payment|transfer)|subscribe|donate|send|submit|post|publish|tweet|reply|delete|remove|erase|destroy|deactivate|close (?:my |your )?account|cancel (?:my |your )?(?:subscription|order|account|plan)|unsubscribe|transfer|withdraw|apply|sign up|register|book|reserve|invite|share|merge|deploy|approve|grant|authori[sz]e)\b/i;
+const HIGH_WORDS =
+  /\b(buy|purchase|pay|payment|checkout|check out|place (?:my |your )?order|order now|confirm (?:order|purchase|payment|transfer)|donate|delete|remove|erase|destroy|deactivate|close (?:my |your )?account|cancel (?:my |your )?(?:subscription|order|account|plan)|unsubscribe|transfer|withdraw|merge|deploy|grant|authori[sz]e)\b/i;
+const WRITE_WORDS = /\b(subscribe|send|submit|post|publish|tweet|reply|apply|sign up|register|book|reserve|invite|share|approve)\b/i;
 
 const SUBMIT_INPUT_TYPES = new Set(['submit', 'image']);
 
@@ -72,42 +90,48 @@ const sameDocument = (href: string, url: string): boolean => {
  */
 export const assessAction = (action: Action, ctx: AssessContext): Assessment => {
   const t = ctx.target;
-  const reasons: string[] = [];
+  const details: Reason[] = [];
+  const add = (level: Reason['level'], text: string): void => {
+    details.push({ level, text });
+  };
   let destination: string | null = null;
 
   switch (action.type) {
     case 'upload':
-      reasons.push('uploads files to the page');
+      add('write', 'uploads files to the page');
       break;
     case 'click': {
       if (t?.href && !t.href.toLowerCase().startsWith('javascript:') && !sameDocument(t.href, ctx.url)) destination = t.href;
       if (t && isSubmitControl(t)) {
         destination = t.formAction ?? destination;
-        if (isPost(t)) reasons.push('submits a form');
+        if (isPost(t)) add('write', 'submits a form');
       }
-      const words = [ctx.refName, t?.text].find((w) => w && RISK_WORDS.test(w));
-      if (words) reasons.push(`the control says “${words.trim().slice(0, 60)}”`);
+      const high = [ctx.refName, t?.text].find((w) => w && HIGH_WORDS.test(w));
+      const write = [ctx.refName, t?.text].find((w) => w && WRITE_WORDS.test(w));
+      if (high) add('high', `the control says “${high.trim().slice(0, 60)}”`);
+      else if (write) add('write', `the control says “${write.trim().slice(0, 60)}”`);
       break;
     }
     case 'key': {
       const pressesEnter = /(^|\+)Enter$/i.test(action.keys.trim());
       if (pressesEnter && t?.inForm && t.tag?.toUpperCase() === 'INPUT') {
         destination = t.formAction;
-        if (isPost(t)) reasons.push('submits a form');
+        if (isPost(t)) add('write', 'submits a form');
       }
       break;
     }
     case 'dialog': {
       const type = t?.dialogType?.toLowerCase();
       if (action.accept && (type === 'confirm' || type === 'prompt' || type === 'beforeunload')) {
-        reasons.push(`accepts a ${type} dialog${t?.text ? `: “${t.text.slice(0, 80)}”` : ''}`);
+        add('high', `accepts a ${type} dialog${t?.text ? `: “${t.text.slice(0, 80)}”` : ''}`);
       }
       break;
     }
     default:
       break;
   }
-  return { consequential: reasons.length > 0, reasons, destination };
+  const risk: RiskLevel = details.some((d) => d.level === 'high') ? 'high' : details.length > 0 ? 'write' : 'none';
+  return { consequential: details.length > 0, risk, reasons: details.map((d) => d.text), details, destination };
 };
 
 const hostOf = (url: string): string => {

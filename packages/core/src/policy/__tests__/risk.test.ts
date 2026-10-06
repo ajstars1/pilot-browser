@@ -19,12 +19,12 @@ const click = { type: 'click', target: { ref: '@e1' } } as const;
 describe('assessAction', () => {
   it('should flag a submit button in a POST form, with the form action as destination', () => {
     const a = assessAction(click, { url, target: facts({ inForm: true, formMethod: 'post', formAction: 'https://shop.example.com/order' }) });
-    expect(a).toEqual({ consequential: true, reasons: ['submits a form'], destination: 'https://shop.example.com/order' });
+    expect(a).toMatchObject({ consequential: true, risk: 'write', reasons: ['submits a form'], destination: 'https://shop.example.com/order' });
   });
 
   it('should not flag a GET search form, but still report where it goes', () => {
     const a = assessAction(click, { url, target: facts({ text: 'Search', inForm: true, formMethod: 'get', formAction: 'https://shop.example.com/search' }) });
-    expect(a).toEqual({ consequential: false, reasons: [], destination: 'https://shop.example.com/search' });
+    expect(a).toMatchObject({ consequential: false, risk: 'none', reasons: [], destination: 'https://shop.example.com/search' });
   });
 
   it('should treat type="button" inside a form as not submitting', () => {
@@ -59,6 +59,22 @@ describe('assessAction', () => {
     const target = facts({ tag: 'DIALOG', dialogType: 'confirm', text: 'Really delete?' });
     expect(assessAction({ type: 'dialog', accept: true }, { url, target }).reasons).toEqual(['accepts a confirm dialog: “Really delete?”']);
     expect(assessAction({ type: 'dialog', accept: false }, { url, target }).consequential).toBe(false);
+  });
+});
+
+describe('risk levels', () => {
+  it('should rank money and destruction above ordinary submits', () => {
+    expect(assessAction(click, { url, target: null, refName: 'Place order' }).risk).toBe('high');
+    expect(assessAction(click, { url, target: null, refName: 'Delete repository' }).risk).toBe('high');
+    expect(assessAction(click, { url, target: null, refName: 'Submit application' }).risk).toBe('write');
+    expect(assessAction(click, { url, target: null, refName: 'Send message' }).risk).toBe('write');
+    expect(assessAction({ type: 'upload', ref: '@e2', files: ['/x.pdf'] }, { url, target: null }).risk).toBe('write');
+    expect(assessAction({ type: 'dialog', accept: true }, { url, target: facts({ tag: 'DIALOG', dialogType: 'confirm' }) }).risk).toBe('high');
+  });
+
+  it('should let a high-risk word win over a submit form', () => {
+    const a = assessAction(click, { url, target: facts({ text: 'Pay now', inForm: true, formMethod: 'post', formAction: 'https://shop.example.com/pay' }) });
+    expect(a.risk).toBe('high');
   });
 });
 
