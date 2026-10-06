@@ -10,7 +10,15 @@ describe('parseSnapshotTree', () => {
 
   it('should parse every ref line of a real snapshot', () => {
     expect(lines.length).toBe(163);
-    expect(lines[0]).toEqual({ ref: 'e1', role: 'heading', name: 'Spike fixture', depth: 0, attrs: ['level=1'], value: '' });
+    expect(lines[0]).toEqual({
+      ref: 'e1',
+      role: 'heading',
+      name: 'Spike fixture',
+      depth: 0,
+      attrs: ['level=1'],
+      value: '',
+      raw: '- heading "Spike fixture" [level=1, ref=e1]',
+    });
   });
 
   it('should keep the name of role-less clickable elements that the JSON refs map drops', () => {
@@ -32,6 +40,6 @@ describe('parseSnapshotTree', () => {
 
   it('should handle escaped quotes and skip lines without refs', () => {
     const parsed = parseSnapshotTree('- heading "Say \\"hi\\"" [ref=e9]\n- generic\n- text "no ref"');
-    expect(parsed).toEqual([{ ref: 'e9', role: 'heading', name: 'Say "hi"', depth: 0, attrs: [], value: '' }]);
+    expect(parsed).toEqual([{ ref: 'e9', role: 'heading', name: 'Say "hi"', depth: 0, attrs: [], value: '', raw: '- heading "Say \\"hi\\"" [ref=e9]' }]);
   });
 });

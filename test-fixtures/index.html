@@ -50,7 +50,11 @@
   </section>
 
   <section>
-    <iframe title="Cross-origin form" src="http://127.0.0.1:8792/frame.html" width="420" height="90"></iframe>
+    <!-- localhost vs 127.0.0.1 = different site, so Chrome runs this frame out of process (OOPIF). -->
+    <iframe id="xframe" title="Cross-origin form" width="420" height="90"></iframe>
+    <script>
+      document.getElementById('xframe').src = `http://localhost:${Number(location.port) + 1}/frame.html`;
+    </script>
   </section>
 
   <section id="below-fold" style="margin-top: 1400px">

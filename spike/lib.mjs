@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const SPIKE_DIR = path.dirname(fileURLToPath(import.meta.url));
-export const FIXTURES = path.join(SPIKE_DIR, 'fixtures');
+export const FIXTURES = path.join(SPIKE_DIR, '..', 'test-fixtures');
 export const OUT = path.join(SPIKE_DIR, 'out');
 
 const require = createRequire(import.meta.url);

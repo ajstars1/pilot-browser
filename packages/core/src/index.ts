@@ -21,3 +21,6 @@ export {
   wslWindowsUserDataDirs,
 } from './discovery/endpoints.js';
 export type { HostInfo } from './discovery/endpoints.js';
+export { OVERLAY_SCRIPT, overlayStatusExpression } from './overlay/script.js';
+export { createOriginPolicy } from './policy/origin.js';
+export type { OriginPolicy } from './policy/origin.js';

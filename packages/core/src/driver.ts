@@ -44,6 +44,8 @@ export interface BrowserDriver {
   /** `observationId` must be the latest one; otherwise the driver returns `stale_ref`. */
   act(observationId: string, action: Action): Promise<Result<Observation>>;
   screenshot(options?: { readonly annotate?: boolean }): Promise<Result<{ readonly png: Uint8Array; readonly width: number; readonly height: number }>>;
+  /** Show what the agent is doing in the page overlay. Optional; drivers without an overlay omit it. */
+  setStatus?(text: string): Promise<void>;
   /** Attach mode: detach only, never close the user's browser. */
   disconnect(): Promise<void>;
 }

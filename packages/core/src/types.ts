@@ -36,6 +36,8 @@ export interface RefLine {
   readonly attrs: readonly string[];
   /** Text after the closing bracket, e.g. a field's current value. */
   readonly value: string;
+  /** The original line, for re-emitting a filtered tree without reformatting. */
+  readonly raw: string;
 }
 
 export interface Observation {

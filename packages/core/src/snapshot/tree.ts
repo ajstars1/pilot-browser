@@ -27,6 +27,7 @@ export const parseSnapshotTree = (tree: string): RefLine[] => {
       depth: indent.length / 2,
       attrs: attrs.filter((a) => a !== refAttr),
       value: rest.replace(/^:\s*/, '').trim(),
+      raw,
     });
   }
   return lines;
