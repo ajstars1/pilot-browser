@@ -1,8 +1,27 @@
 {
   "name": "@pilot-browser/mcp",
-  "version": "0.0.0",
-  "description": "MCP server that lets AI agents drive your real, logged-in browser with a visible cursor and an origin allowlist.",
+  "version": "0.1.0",
+  "description": "MCP server that lets AI agents drive your real, logged-in browser: visible cursor, takeover, handoff, approvals, origin allowlist.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser-automation",
+    "ai-agent",
+    "claude",
+    "chrome",
+    "prompt-injection"
+  ],
   "license": "Apache-2.0",
+  "author": "Ayush Jamwal (https://github.com/ajstars1)",
+  "homepage": "https://github.com/ajstars1/pilot-browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajstars1/pilot-browser.git",
+    "directory": "packages/mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/ajstars1/pilot-browser/issues"
+  },
   "type": "module",
   "bin": {
     "pilot-browser-mcp": "./dist/bin.js"
@@ -13,19 +32,29 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "node ../../scripts/copy-legal.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "@pilot-browser/core": "0.0.0",
-    "@pilot-browser/driver-agent-browser": "0.0.0",
+    "@pilot-browser/core": "0.1.0",
+    "@pilot-browser/driver-agent-browser": "0.1.0",
     "zod": "^4.6.5"
   }
 }

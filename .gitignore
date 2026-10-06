@@ -4,3 +4,6 @@ dist/
 spike/out/
 .env
 .env.*
+packages/*/LICENSE
+packages/*/NOTICE
+*.tgz

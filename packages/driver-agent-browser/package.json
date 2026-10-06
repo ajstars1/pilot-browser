@@ -1,8 +1,25 @@
 {
   "name": "@pilot-browser/driver-agent-browser",
-  "version": "0.0.0",
-  "description": "pilot-browser driver for Chrome, Brave and Edge, built on vercel-labs/agent-browser (CDP).",
+  "version": "0.1.0",
+  "description": "pilot-browser driver for Chrome, Brave and Edge (attach to your running browser or a managed profile), built on agent-browser.",
+  "keywords": [
+    "browser-automation",
+    "ai-agent",
+    "chrome",
+    "cdp",
+    "agent-browser"
+  ],
   "license": "Apache-2.0",
+  "author": "Ayush Jamwal (https://github.com/ajstars1)",
+  "homepage": "https://github.com/ajstars1/pilot-browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajstars1/pilot-browser.git",
+    "directory": "packages/driver-agent-browser"
+  },
+  "bugs": {
+    "url": "https://github.com/ajstars1/pilot-browser/issues"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -10,17 +27,27 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "node ../../scripts/copy-legal.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
-    "@pilot-browser/core": "0.0.0",
+    "@pilot-browser/core": "0.1.0",
     "agent-browser": "0.38.2"
   }
 }
