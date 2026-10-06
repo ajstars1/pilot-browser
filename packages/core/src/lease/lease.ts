@@ -30,12 +30,26 @@ export interface LeaseSnapshot {
  * Engine-neutral interaction lease. The page only reports events; this state machine is
  * the source of truth, so it survives navigations that reset the in-page overlay.
  */
+export interface LeaseOptions {
+  /**
+   * Whether the user's clicks and typing in the tab take control from the agent. Default true.
+   * Unattended runs turn it off: nobody is at the browser, so input can only be the page's own
+   * doing, and a false takeover would stall the run. Pause, Hand back and Stop always work.
+   */
+  readonly inputTakesControl?: boolean;
+}
+
 export class InteractionLease {
+  private readonly inputTakesControl: boolean;
   private current: ControlState = 'agent';
   private request = '';
   private handbackCount = 0;
   private approvalCount = 0;
   private denialCount = 0;
+
+  constructor(options: LeaseOptions = {}) {
+    this.inputTakesControl = options.inputTakesControl ?? true;
+  }
 
   get state(): ControlState {
     return this.current;
@@ -68,7 +82,7 @@ export class InteractionLease {
           break;
         case 'input':
           // During a handoff or an approval the user is expected to look around; that doesn't change who waits.
-          if (this.current === 'agent') this.current = 'user';
+          if (this.inputTakesControl && this.current === 'agent') this.current = 'user';
           break;
         case 'pause':
           if (this.current === 'agent' || this.current === 'approval') {

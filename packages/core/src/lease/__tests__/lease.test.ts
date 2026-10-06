@@ -17,6 +17,16 @@ describe('InteractionLease', () => {
     expect(b.state).toBe('user');
   });
 
+  it('should ignore page input when input does not take control (unattended), but keep Pause and Stop', () => {
+    const lease = new InteractionLease({ inputTakesControl: false });
+    expect(lease.apply(ev('input', 'input'))).toBe(false);
+    expect(lease.state).toBe('agent');
+    lease.apply(ev('pause'));
+    expect(lease.state).toBe('user');
+    lease.apply(ev('handback', 'stop'));
+    expect(lease.state).toBe('stopped');
+  });
+
   it('should return control only on an explicit hand-back', () => {
     const lease = new InteractionLease();
     lease.apply(ev('input', 'input'));

@@ -4,8 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildOverlayScript,
+  CAPTCHA_PROBE,
   InteractionLease,
   overlayCall,
+  parseCaptcha,
   parseOverlayDrain,
   parseSnapshotTree,
   parseTargetFacts,
@@ -47,6 +49,12 @@ export interface AgentBrowserDriverOptions {
   readonly connectTimeoutMs?: number;
   /** How often to check the tab for the user taking over. Default 750ms. */
   readonly leasePollMs?: number;
+  /**
+   * Whether clicking or typing in the tab takes control from the agent. Default true. Turn it
+   * off for unattended runs, where any input is the page's own doing; the overlay's Pause,
+   * Hand back and Stop buttons still work.
+   */
+  readonly inputTakeover?: boolean;
   readonly env?: Readonly<Record<string, string>>;
 }
 
@@ -86,7 +94,7 @@ export class AgentBrowserDriver implements BrowserDriver {
   private readonly leasePollMs: number;
   /** Authenticates calls into the in-page overlay; page scripts never see it. */
   private readonly token = randomUUID();
-  private readonly lease = new InteractionLease();
+  private readonly lease: InteractionLease;
   private globalArgs: readonly string[] = [];
   private mode: ConnectMode | null = null;
   private tabId = '';
@@ -109,6 +117,7 @@ export class AgentBrowserDriver implements BrowserDriver {
     this.timeoutMs = options.commandTimeoutMs ?? 30_000;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 90_000;
     this.leasePollMs = options.leasePollMs ?? 750;
+    this.lease = new InteractionLease({ inputTakesControl: options.inputTakeover ?? true });
     this.capabilities = { a11yTree: true, multiClient: true, bindings: false, screencast: false, fileUpload: true, handoff: this.overlay };
   }
 
@@ -164,6 +173,9 @@ export class AgentBrowserDriver implements BrowserDriver {
       // With --pin-tab the first attach opens a fresh tab instead of adopting one of the user's.
       const opened = await this.run(['open', 'about:blank'], this.connectTimeoutMs);
       if (!opened.success) {
+        // Stop the session's daemon too: left running, it would finish attaching after a late
+        // Allow and leave an orphaned tab in the user's browser.
+        await this.run(['close'], 5_000);
         this.globalArgs = [];
         await this.removeOverlayFile();
         return envelopeError(opened);
@@ -204,16 +216,27 @@ export class AgentBrowserDriver implements BrowserDriver {
       await this.checkDialogLocked();
       return;
     }
-    const drain = env.success ? parseOverlayDrain(env.data.result) : null;
-    // No overlay in this document yet (or a page we can't script): nothing to learn.
-    if (!drain) return;
+    if (!env.success) return;
+    const drain = parseOverlayDrain(env.data.result);
+    if (!drain) {
+      // The page is scriptable but has no overlay: a document the init script didn't reach.
+      // Install it now, so the user always has Pause / Hand back / Stop.
+      if (env.data.result === null || env.data.result === undefined) await this.installOverlayLocked();
+      return;
+    }
     // Any change of control means the page may have changed under the agent: forget its refs.
     if (this.lease.apply(drain.events)) this.latest = null;
     const { state, message } = this.lease.snapshot();
-    if (state !== 'agent' && state !== drain.mode) {
-      // A navigation reset the overlay; show the user's control again.
-      await this.run(['eval', overlayCall(this.token, 'setMode', state, message)]);
-    }
+    // The lease is the source of truth: a navigation resets the overlay, and ignored input
+    // (unattended runs) may have flipped it; show the real state again.
+    if (state !== drain.mode) await this.run(['eval', overlayCall(this.token, 'setMode', state, message)]);
+  }
+
+  private async installOverlayLocked(): Promise<void> {
+    const installed = await this.run(['eval', `${buildOverlayScript(this.token)} true`], 4_000);
+    if (!installed.success) return;
+    const { state, message } = this.lease.snapshot();
+    await this.run(['eval', overlayCall(this.token, 'setMode', state, message)], 4_000);
   }
 
   private gate(): BrowserError | null {
@@ -256,7 +279,7 @@ export class AgentBrowserDriver implements BrowserDriver {
     });
   }
 
-  async waitForUser(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState> {
+  async waitForUser(timeoutMs: number, onTick?: (elapsedMs: number) => void, signal?: AbortSignal): Promise<ControlState> {
     const started = Date.now();
     for (;;) {
       const { state } = await this.control();
@@ -266,7 +289,7 @@ export class AgentBrowserDriver implements BrowserDriver {
         return state;
       }
       const elapsed = Date.now() - started;
-      if (elapsed >= timeoutMs) return state;
+      if (elapsed >= timeoutMs || signal?.aborted) return state;
       onTick?.(elapsed);
       await sleep(Math.min(this.leasePollMs, timeoutMs - elapsed));
     }
@@ -368,7 +391,11 @@ export class AgentBrowserDriver implements BrowserDriver {
     });
   }
 
-  async waitForDecision(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'> {
+  async waitForDecision(
+    timeoutMs: number,
+    onTick?: (elapsedMs: number) => void,
+    signal?: AbortSignal,
+  ): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'> {
     const started = Date.now();
     const before = this.lease.snapshot();
     for (;;) {
@@ -378,7 +405,7 @@ export class AgentBrowserDriver implements BrowserDriver {
       if (now.state === 'stopped') return 'stopped';
       if (now.state === 'user') return 'user';
       const elapsed = Date.now() - started;
-      if (now.state !== 'approval' || elapsed >= timeoutMs) {
+      if (now.state !== 'approval' || elapsed >= timeoutMs || signal?.aborted) {
         await this.exclusive(async () => {
           if (this.lease.cancelApproval()) await this.run(['eval', overlayCall(this.token, 'setMode', 'agent', 'pilot-browser is controlling this tab')]);
         });
@@ -417,13 +444,15 @@ export class AgentBrowserDriver implements BrowserDriver {
     const filter = options.filter ?? 'visible';
     const page = await this.runner.batch(
       this.globalArgs,
-      [['get', 'url'], ['get', 'title'], filter === 'all' ? ['snapshot'] : ['snapshot', '-i'], ['eval', '[innerWidth, innerHeight]']],
+      [['get', 'url'], ['get', 'title'], filter === 'all' ? ['snapshot'] : ['snapshot', '-i'], ['eval', '[innerWidth, innerHeight]'], ['eval', CAPTCHA_PROBE]],
       { timeoutMs: this.timeoutMs },
     );
     if (!Array.isArray(page)) return envelopeError(page);
-    const failed = page.find((e) => e.error !== null);
+    // The CAPTCHA probe is best-effort; only the page reads must succeed.
+    const failed = page.slice(0, 4).find((e) => e.error !== null);
     if (failed) return fail(toBrowserError(failed.error));
-    const [urlEntry, titleEntry, snapEntry, vpEntry] = page as [BatchEntry, BatchEntry, BatchEntry, BatchEntry];
+    const [urlEntry, titleEntry, snapEntry, vpEntry, captchaEntry] = page as [BatchEntry, BatchEntry, BatchEntry, BatchEntry, BatchEntry | undefined];
+    const captcha = captchaEntry && captchaEntry.error === null ? parseCaptcha(captchaEntry.result.result) : null;
 
     const url = str(urlEntry.result.url);
     const fullTree = str(snapEntry.result.snapshot);
@@ -457,7 +486,7 @@ export class AgentBrowserDriver implements BrowserDriver {
     }
 
     const observationId = createHash('sha256').update(`${this.tabId}\n${url}\n${fullTree}`).digest('hex').slice(0, 12);
-    const observation: Observation = { observationId, url, title: str(titleEntry.result.title), tree, refs: shown, omitted };
+    const observation: Observation = { observationId, url, title: str(titleEntry.result.title), tree, refs: shown, omitted, captcha };
     this.latest = { observation, refs: new Map(lines.map((l) => [l.ref, l])), options };
     return { ok: true, value: observation };
   }
@@ -496,7 +525,11 @@ export class AgentBrowserDriver implements BrowserDriver {
       const begin = bracket ? [['eval', overlayCall(this.token, 'begin', status)]] : [];
       const end = bracket ? [['eval', overlayCall(this.token, 'end')]] : [];
       const entries = await this.runner.batch(this.globalArgs, [...begin, ...commands.value], { timeoutMs: this.timeoutMs, bail: true });
-      if (!Array.isArray(entries)) return envelopeError(entries);
+      if (!Array.isArray(entries)) {
+        // Close the agent-input window even when the action hung, so the user's controls work again.
+        if (end.length > 0) await this.runner.batch(this.globalArgs, end, { timeoutMs: 4_000 });
+        return envelopeError(entries);
+      }
       if (entries.some((e) => e.result.dialogOpened === true)) {
         // The action opened a dialog: page scripts are frozen, so don't touch the page until it's answered.
         await this.checkDialogLocked();
@@ -559,11 +592,20 @@ export class AgentBrowserDriver implements BrowserDriver {
    * @internal Test hook: where the overlay's buttons are, in viewport pixels, so tests can
    * press them as the user would (outside any agent-input window).
    */
-  async overlayLayout(): Promise<{ readonly mode: string; readonly buttons: Readonly<Record<string, { x: number; y: number }>> } | null> {
+  async overlayLayout(): Promise<{ readonly mode: string; readonly text: string; readonly buttons: Readonly<Record<string, { x: number; y: number }>> } | null> {
     return this.exclusive(async () => {
       const env = await this.run(['eval', overlayCall(this.token, 'layout')]);
       const raw = env.success ? env.data.result : null;
-      return typeof raw === 'string' ? (JSON.parse(raw) as { mode: string; buttons: Record<string, { x: number; y: number }> }) : null;
+      return typeof raw === 'string' ? (JSON.parse(raw) as { mode: string; text: string; buttons: Record<string, { x: number; y: number }> }) : null;
+    });
+  }
+
+  /** @internal Test hook: whether the overlay is on the page right now (does not count as a heartbeat). */
+  async overlayMounted(): Promise<boolean | null> {
+    return this.exclusive(async () => {
+      const env = await this.run(['eval', overlayCall(this.token, 'mounted')]);
+      const raw = env.success ? env.data.result : null;
+      return typeof raw === 'boolean' ? raw : null;
     });
   }
 
@@ -572,6 +614,8 @@ export class AgentBrowserDriver implements BrowserDriver {
     this.poller = null;
     await this.exclusive(async () => {
       if (!this.mode) return;
+      // Take the controls off the page first, in case the tab outlives the session.
+      if (this.overlay) await this.run(['eval', overlayCall(this.token, 'dispose')], 3_000);
       // Attach: close only the agent's own tab, then detach. agent-browser never closes an attached browser.
       if (this.mode.kind === 'attach') await this.run(['tab', 'close']);
       await this.run(['close']);

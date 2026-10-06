@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CAPTCHA states</title></head>
+<body>
+<h1>CAPTCHA states</h1>
+<p id="state">badge</p>
+<!-- Invisible reCAPTCHA: a badge plus a hidden challenge container. Not a challenge on its own. -->
+<div style="position:fixed;right:0;bottom:14px;width:256px;height:60px">
+  <iframe title="reCAPTCHA" src="/recaptcha/api2/anchor?k=test&amp;size=invisible" style="width:256px;height:60px;border:0"></iframe>
+</div>
+<div id="bframe-box" style="visibility:hidden;position:absolute;top:-10000px">
+  <iframe title="recaptcha challenge" src="/recaptcha/api2/bframe?k=test" style="width:400px;height:580px;border:0"></iframe>
+</div>
+<div id="checkbox-box" style="display:none">
+  <iframe title="reCAPTCHA checkbox" src="/recaptcha/api2/anchor?k=test2&amp;size=normal" style="width:304px;height:78px;border:0"></iframe>
+  <textarea name="g-recaptcha-response" style="display:none"></textarea>
+</div>
+<script>
+  window.showChallenge = () => {
+    const box = document.getElementById('bframe-box');
+    box.style.visibility = 'visible';
+    box.style.top = '10px';
+  };
+  window.showCheckbox = () => {
+    document.getElementById('checkbox-box').style.display = 'block';
+  };
+  window.solveCheckbox = () => {
+    document.querySelector('[name="g-recaptcha-response"]').value = 'token';
+  };
+</script>
+</body>
+</html>

@@ -54,18 +54,24 @@ export interface BrowserDriver {
   requestHandoff?(message: string): Promise<Result<LeaseSnapshot>>;
   /**
    * Wait until the agent may act again, the user stops it, or the timeout passes.
-   * `onTick` is called about once a second while waiting (for progress reporting).
+   * `onTick` is called about once a second while waiting (for progress reporting). An aborted
+   * `signal` ends the wait early (the caller cancelled), returning the current state.
    */
-  waitForUser?(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<ControlState>;
+  waitForUser?(timeoutMs: number, onTick?: (elapsedMs: number) => void, signal?: AbortSignal): Promise<ControlState>;
   /** What is really under an action (from the live DOM), for the risk check. Null when unknown. */
   describeTarget?(observationId: string, action: Action): Promise<Result<TargetFacts | null>>;
   /** Ask the user to approve one action; shows Approve / Deny in the tab. */
   requestApproval?(summary: string): Promise<Result<LeaseSnapshot>>;
   /**
    * Wait for Approve / Deny. On timeout the request is withdrawn. Returns `user` if the user
-   * took over instead, `stopped` if they pressed Stop.
+   * took over instead, `stopped` if they pressed Stop. An aborted `signal` withdraws the request
+   * like a timeout.
    */
-  waitForDecision?(timeoutMs: number, onTick?: (elapsedMs: number) => void): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'>;
+  waitForDecision?(
+    timeoutMs: number,
+    onTick?: (elapsedMs: number) => void,
+    signal?: AbortSignal,
+  ): Promise<'approved' | 'denied' | 'timeout' | 'user' | 'stopped'>;
   /** Re-read the page and report whether it still matches this observation (binds approvals to what was shown). */
   isCurrent?(observationId: string): Promise<boolean>;
   /** Attach mode: detach only, never close the user's browser. */

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Re-rendered page</title></head>
+<body>
+<h1>Re-rendered page</h1>
+<button type="button">Continue</button>
+<script>
+  // Like a framework hydrating the whole document (Remix on Greenhouse): anything in <html>
+  // that isn't <head> or <body> is dropped, including injected overlays.
+  const sweep = () => {
+    for (const node of Array.from(document.documentElement.children)) {
+      if (node !== document.head && node !== document.body) node.remove();
+    }
+  };
+  addEventListener('load', () => setTimeout(sweep, 200));
+</script>
+</body>
+</html>

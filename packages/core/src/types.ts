@@ -51,6 +51,8 @@ export interface Observation {
   readonly refs: readonly RefLine[];
   /** Interactive elements left out (e.g. below the viewport). */
   readonly omitted: number;
+  /** A visible, unsolved CAPTCHA or bot check on the page, e.g. "recaptcha challenge visible". */
+  readonly captcha?: string | null;
 }
 
 export type BrowserErrorCode =
@@ -68,6 +70,10 @@ export type BrowserErrorCode =
   | 'user_stopped'
   /** The user denied approval for this action. Do not retry it; ask the user. */
   | 'approval_denied'
+  /** Unattended run: nobody is at the browser, so handoffs and waits for the user can't happen. */
+  | 'unattended'
+  /** Unattended run: this action needs the user's approval and nobody is there to give it. */
+  | 'approval_unavailable'
   | 'engine_error';
 
 export interface BrowserError {

@@ -35,15 +35,30 @@ const pilotOverlay = (token: string): void => {
   const formAction = getter(HTMLFormElement.prototype, 'action');
   const formMethod = getter(HTMLFormElement.prototype, 'method');
   const inputValue = getter(HTMLInputElement.prototype, 'value');
+  const iframeSrc = getter(HTMLIFrameElement.prototype, 'src');
+  const isConnectedOf = getter(Node.prototype, 'isConnected');
+  const appendChild = Node.prototype.appendChild;
+  const removeChild = Node.prototype.removeChild;
+  const every = setInterval.bind(window);
+  const later = setTimeout.bind(window);
   const GRACE_MS = 400;
   const FAILSAFE_MS = 20_000;
+  /** No word from the driver for this long means its session is gone: take the overlay down. */
+  const ORPHAN_MS = 20_000;
+  const IDLE = 'pilot-browser is controlling this tab';
+  // Challenge widgets (reCAPTCHA, hCaptcha, Turnstile, Arkose) move focus into their own frames
+  // on their own; that focus change is the page's doing, not the user's.
+  const CHALLENGE_FRAME = /\/recaptcha\/|hcaptcha\.com|challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha\.com/i;
 
   type Mode = 'agent' | 'user' | 'handoff' | 'approval' | 'stopped';
   type Queued = { type: 'input' | 'pause' | 'handback' | 'approve' | 'deny' | 'stop' };
   let mode: Mode = 'agent';
-  let status = 'pilot-browser is controlling this tab';
+  let status = IDLE;
   let request = '';
   let agentUntil = 0;
+  let actionSeq = 0;
+  let lastBeat = now();
+  let disposed = false;
   const events: Queued[] = [];
 
   let host: HTMLElement | null = null;
@@ -82,7 +97,7 @@ const pilotOverlay = (token: string): void => {
   };
 
   const record = (type: Queued['type']): void => {
-    if (mode === 'stopped') return;
+    if (mode === 'stopped' || disposed) return;
     events.push({ type });
     if (events.length > 100) events.shift();
     if (type === 'stop') mode = 'stopped';
@@ -93,8 +108,16 @@ const pilotOverlay = (token: string): void => {
     render();
   };
 
+  const attached = (el: Node): boolean => isConnectedOf?.call(el) === true;
+
   const mount = (): void => {
-    if (host || !document.documentElement) return;
+    if (disposed || !document.documentElement) return;
+    if (host) {
+      // Pages that hydrate or re-render the whole document (e.g. Remix on Greenhouse) drop
+      // foreign nodes from <html>. Put the overlay back, or the user loses their controls.
+      if (!attached(host)) appendChild.call(document.documentElement, host);
+      return;
+    }
     host = document.createElement('pilot-browser-overlay');
     // aria-hidden keeps the overlay out of accessibility snapshots, so the agent never gets refs to it.
     host.setAttribute('aria-hidden', 'true');
@@ -145,7 +168,19 @@ const pilotOverlay = (token: string): void => {
     cursor = document.createElement('div');
     cursor.className = 'cursor';
     root.appendChild(cursor);
-    document.documentElement.appendChild(host);
+    appendChild.call(document.documentElement, host);
+  };
+
+  /** Take the overlay off the page (the session ended); the next sign of life brings it back. */
+  const detach = (): void => {
+    const parent = host?.parentNode;
+    if (host && parent) removeChild.call(parent, host);
+  };
+
+  /** The driver is alive: note it, and make sure the controls are on the page. */
+  const beat = (): void => {
+    lastBeat = now();
+    mount();
   };
 
   const fromOverlay = (event: globalThis.Event): boolean => host !== null && event.composedPath().includes(host);
@@ -193,8 +228,11 @@ const pilotOverlay = (token: string): void => {
     // Init scripts may not reach out-of-process iframes, so a click inside one never reaches this
     // document. Focus moving into the frame does: the window blurs and the iframe becomes active.
     addEventListener('blur', () => {
-      setTimeout(() => {
-        if (document.activeElement?.tagName === 'IFRAME' && !inAgentWindow()) record('input');
+      later(() => {
+        const active = activeElementOf?.call(document) as Element | null;
+        if (!active || tagNameOf?.call(active) !== 'IFRAME' || inAgentWindow()) return;
+        if (CHALLENGE_FRAME.test(String(iframeSrc?.call(active) ?? ''))) return;
+        record('input');
       }, 0);
     });
     addEventListener('message', (event: MessageEvent) => {
@@ -210,15 +248,24 @@ const pilotOverlay = (token: string): void => {
     /** Open an agent-input window and show what the agent is doing. */
     begin(t: string, text?: string): boolean {
       if (t !== token) return false;
+      actionSeq += 1;
       agentUntil = now() + FAILSAFE_MS;
       if (typeof text === 'string' && text) status = text;
-      mount();
+      beat();
       render();
       return true;
     },
     end(t: string): boolean {
       if (t !== token) return false;
       agentUntil = now() + GRACE_MS;
+      lastBeat = now();
+      // Once the action is over, stop describing it ("Clicking “Submit”" would be stale).
+      const seq = actionSeq;
+      later(() => {
+        if (seq !== actionSeq || status === IDLE) return;
+        status = IDLE;
+        if (mode === 'agent') render();
+      }, GRACE_MS);
       return true;
     },
     /** Display the driver's authoritative state (e.g. after a navigation reset this document). */
@@ -227,15 +274,32 @@ const pilotOverlay = (token: string): void => {
       mode = next as Mode;
       if (next === 'handoff' || next === 'approval') request = typeof text === 'string' ? text : '';
       else if (next === 'agent' && typeof text === 'string' && text) status = text;
-      mount();
+      beat();
       render();
       return true;
     },
-    /** Return and clear queued events, as a JSON string built with the captured stringify. */
+    /**
+     * Return and clear queued events, as a JSON string built with the captured stringify.
+     * The driver drains on every lease poll, so this doubles as its heartbeat.
+     */
     drain(t: string): string | null {
       if (t !== token) return null;
+      beat();
       const out = stringify({ mode, events: events.splice(0) });
       return out;
+    },
+    /** The session is over: remove the overlay for good and stop reporting input. */
+    dispose(t: string): boolean {
+      if (t !== token) return false;
+      disposed = true;
+      events.splice(0);
+      detach();
+      return true;
+    },
+    /** Whether the overlay is on the page right now, for tests. */
+    mounted(t: string): boolean | null {
+      if (t !== token) return null;
+      return host !== null && attached(host);
     },
     /**
      * What is really at viewport point (x, y), or the focused element when no point is given:
@@ -272,10 +336,21 @@ const pilotOverlay = (token: string): void => {
         const r = b.getBoundingClientRect();
         buttons[b.dataset.act ?? ''] = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
       }
-      return stringify({ mode, buttons });
+      return stringify({ mode, text: mode === 'agent' ? status : request, buttons });
     },
   });
   Object.defineProperty(globalThis, KEY, { value: api, writable: false, configurable: false, enumerable: false });
+
+  if (isTop) {
+    // Without a heartbeat the driver is gone (crashed, or the session ended without closing
+    // this tab): a pill with dead buttons would only mislead, so take it down. While the driver
+    // lives, keep the overlay on the page even if the page removed it.
+    every(() => {
+      if (disposed) return;
+      if (now() - lastBeat > ORPHAN_MS && !inAgentWindow()) detach();
+      else mount();
+    }, 1000);
+  }
 
   if (document.readyState === 'loading') {
     addEventListener('DOMContentLoaded', mount, { once: true });
@@ -287,7 +362,7 @@ const pilotOverlay = (token: string): void => {
 /** Self-invoking overlay source for one session. The token never appears in function source. */
 export const buildOverlayScript = (token: string): string => `(${pilotOverlay.toString()})(${JSON.stringify(token)});`;
 
-type OverlayMethod = 'begin' | 'end' | 'setMode' | 'drain' | 'layout' | 'describe';
+type OverlayMethod = 'begin' | 'end' | 'setMode' | 'drain' | 'layout' | 'describe' | 'dispose' | 'mounted';
 
 /** Expression calling an overlay method; evaluates to null when the overlay isn't installed. */
 export const overlayCall = (token: string, method: OverlayMethod, ...args: (string | number)[]): string =>

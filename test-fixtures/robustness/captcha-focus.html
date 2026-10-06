@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Invisible CAPTCHA</title></head>
+<body>
+<h1>Apply</h1>
+<button type="button" id="submit">Submit application</button>
+<div id="challenge"></div>
+<script>
+  // A cross-site "reCAPTCHA" challenge frame that appears a while after submit and takes focus
+  // on its own, the way an invisible reCAPTCHA escalates to a visible challenge.
+  document.getElementById('submit').addEventListener('click', () => {
+    setTimeout(() => {
+      const frame = document.createElement('iframe');
+      frame.src = `http://localhost:${Number(location.port) + 1}/recaptcha/api2/bframe?k=test`;
+      frame.style.cssText = 'width:400px;height:580px;border:0';
+      frame.addEventListener('load', () => frame.focus());
+      document.getElementById('challenge').appendChild(frame);
+    }, 900);
+  });
+</script>
+</body>
+</html>
