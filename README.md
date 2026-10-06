@@ -45,11 +45,20 @@ On native Windows, use `node` with the full path to `bin.js` as above. On WSL wi
 
 ### Tools
 
-`browser_connect`, `browser_disconnect`, `browser_navigate`, `browser_read_page`, `browser_click`, `browser_type`, `browser_select`, `browser_check`, `browser_press_key`, `browser_scroll`, `browser_upload`, `browser_dialog`, `browser_screenshot`.
+`browser_connect`, `browser_disconnect`, `browser_navigate`, `browser_read_page`, `browser_click`, `browser_type`, `browser_select`, `browser_check`, `browser_press_key`, `browser_scroll`, `browser_upload`, `browser_dialog`, `browser_screenshot`, `browser_handoff`, `browser_wait_for_user`.
 
 - **Fresh pages only:** every action quotes the `observationId` of the page it was planned on, so the agent can't click based on a stale page.
 - **Allowed origins:** navigation is limited to the `allowedOrigins` given at connect. A click that lands elsewhere resets the tab.
 - **Untrusted content:** page text reaches the model wrapped as untrusted content.
+
+### You stay in control
+
+The pill at the top of the agent's tab shows what it is doing, with **Pause** and **Stop** buttons.
+
+- **Take over any time.** Click or type in the agent's tab, or press **Pause**. The agent stops acting *and stops seeing the page*, so whatever you type (passwords, codes) never reaches the model. Press **Hand back** when you're done.
+- **Handoff.** For logins, 2FA, CAPTCHAs and confirmations the agent calls `browser_handoff`. The pill turns amber with its request. Do it in the tab and press **Done, hand back**; the agent then gets a fresh look at the page.
+- **Stop.** Ends the session for good. The agent is told not to continue.
+- **The agent can't press these buttons.** Clicks made by the agent are ignored by the overlay, and the page itself can't fake them.
 
 ## Packages
 

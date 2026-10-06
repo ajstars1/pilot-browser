@@ -58,6 +58,34 @@ Never use `--remote-debugging-port` on a real profile:
   - No `eval` or cookie tools by default.
 - **Disconnect after every run.** Attach mode grants whole-browser control while connected.
 
+## Interaction lease and handoff
+
+Exactly one party drives the agent tab at a time. The lease has four states:
+
+| State | Meaning | Agent may act? | Agent may read? |
+|---|---|---|---|
+| `agent` | Normal operation | yes | yes |
+| `user` | The user clicked/typed in the tab or pressed **Pause** | no (`user_control`) | no |
+| `handoff` | The agent asked the user to do something (`browser_handoff`) | no (`user_control`) | no |
+| `stopped` | The user pressed **Stop** (terminal) | no (`user_stopped`) | no |
+
+The agent is blind, not just paused, while the user has control: whatever the user types (passwords, 2FA codes) never reaches the model.
+
+**How the agent's input is told apart from the user's.** Both are `isTrusted`, so pilot-browser brackets every agent action in an *agent-input window*. It calls the overlay's `begin`, then the action, then `end`, in one engine round-trip. Trusted input (pointerdown, keydown, touchstart) outside that window is the user's.
+
+**Trust boundary in the page.** The overlay is installed before any page script runs. Its API is:
+- frozen and non-configurable on `globalThis`;
+- gated by a per-session token, which is passed as an argument so it never appears in function source;
+- built from builtins captured at install time.
+
+So a page can neither fake a hand-back nor hide a takeover. The overlay's buttons ignore clicks inside an agent window, so the agent can't press them. The overlay is `aria-hidden`, so the agent never gets refs to it.
+
+**Source of truth.** The page only queues events. The driver drains them about every 0.75 s and before every action, read and screenshot, and applies them to an `InteractionLease` in Node. When the user navigates, the overlay in the new document starts fresh; the driver re-applies the lease state within one poll. Any change of control invalidates the agent's last observation, so it must look again.
+
+**Cross-origin iframes.** Engine init scripts may not reach out-of-process iframes (agent-browser 0.38.2's don't). A user click inside one is detected from the top frame instead: focus moves into the `<iframe>`.
+
+**Known limit:** if the *agent* last focused an element inside a cross-origin iframe, the user's later typing there (without clicking) isn't detected. Clicking, or pressing **Pause**, always is.
+
 ## Platform support
 
 | Platform | attach | managed | Notes |
@@ -94,7 +122,7 @@ If you launch it with `npx` on native Windows, wrap it:
 ## Roadmap
 
 1. ✅ `AgentBrowserDriver` and `@pilot-browser/mcp` (attach + managed, viewport-clipped observations, origin policy, upload jail, overlay status pill).
-2. Interaction lease and human handoff (pause when the user touches the tab; `browser_handoff`).
+2. ✅ Interaction lease and human handoff (take over by touching the tab, Pause / Hand back / Stop, `browser_handoff`).
 3. Managed mode, policy engine, injection test suite.
 4. `BidiDriver` for Firefox (managed first).
 5. Optional extension relay transport.
