@@ -81,6 +81,8 @@ export class AgentBrowserRunner {
         clearTimeout(timer);
         resolve({ stdout, stderr, timedOut });
       });
+      // The CLI can exit before reading stdin (e.g. its daemon was just killed); that's EPIPE, not a crash.
+      child.stdin.on('error', () => undefined);
       child.stdin.end(stdin ?? '');
     });
   }

@@ -29,6 +29,7 @@ import { resolveAgentBrowser, type Invocation } from './binary.js';
 import { actionToCommands, dependsOnObservation, normalizeRef, refsOf } from './commands.js';
 import { toBrowserError } from './errors.js';
 import { pngSize } from './png.js';
+import { browsersForProfile, daemonPid, daemonSessions, isAlive, listProcesses, terminate } from './process.js';
 import { AgentBrowserRunner, type BatchEntry, type Envelope } from './runner.js';
 import { clipToViewport, type Box } from './viewport.js';
 
@@ -72,6 +73,13 @@ const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v)
 const envelopeError = <T>(env: Envelope): Result<T> => fail(toBrowserError(env.error, env.code));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+const HUNG: BrowserError = {
+  code: 'engine_error',
+  message:
+    'The browser stopped responding, so pilot-browser closed it. Anything not yet submitted is lost. Call browser_disconnect, then browser_connect to start again.',
+  retryable: false,
+};
+
 /**
  * BrowserDriver for Chromium browsers (Chrome, Brave, Edge), built on agent-browser.
  * Attach mode drives the user's running browser through its approval-mode endpoint and
@@ -86,6 +94,7 @@ export class AgentBrowserDriver implements BrowserDriver {
   readonly capabilities: DriverCapabilities;
 
   private readonly runner: AgentBrowserRunner;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly session: string;
   private readonly overlay: boolean;
   private readonly inputMode: string;
@@ -97,6 +106,8 @@ export class AgentBrowserDriver implements BrowserDriver {
   private readonly lease: InteractionLease;
   private globalArgs: readonly string[] = [];
   private mode: ConnectMode | null = null;
+  /** Managed mode: the profile this session's browser runs on, so a hung one can be found and closed. */
+  private profileDir: string | null = null;
   private tabId = '';
   private latest: Latest | null = null;
   /** Options of the last observation, kept even when `latest` is invalidated, to re-read the same way. */
@@ -111,6 +122,7 @@ export class AgentBrowserDriver implements BrowserDriver {
 
   constructor(options: AgentBrowserDriverOptions = {}) {
     this.runner = new AgentBrowserRunner(options.invocation ?? resolveAgentBrowser(), options.env);
+    this.env = { ...process.env, ...options.env };
     this.session = options.sessionName ?? `pilot-${randomUUID().slice(0, 8)}`;
     this.overlay = options.overlay ?? true;
     this.inputMode = options.inputMode ?? 'smooth';
@@ -161,6 +173,12 @@ export class AgentBrowserDriver implements BrowserDriver {
         if (mode.endpoint.engine !== 'chromium') return engineError(`agent-browser drives Chromium browsers only, not ${mode.endpoint.engine}.`);
         this.globalArgs = [...base, '--cdp', mode.endpoint.wsUrl, '--pin-tab'];
       } else {
+        const conflict = await this.reclaimProfile(mode.profileDir);
+        if (conflict) {
+          await this.removeOverlayFile();
+          return engineError(conflict);
+        }
+        this.profileDir = mode.profileDir;
         this.globalArgs = [
           ...base,
           '--profile',
@@ -176,7 +194,9 @@ export class AgentBrowserDriver implements BrowserDriver {
         // Stop the session's daemon too: left running, it would finish attaching after a late
         // Allow and leave an orphaned tab in the user's browser.
         await this.run(['close'], 5_000);
+        await this.killSession();
         this.globalArgs = [];
+        this.profileDir = null;
         await this.removeOverlayFile();
         return envelopeError(opened);
       }
@@ -188,6 +208,71 @@ export class AgentBrowserDriver implements BrowserDriver {
       if (this.overlay) this.schedulePoll();
       return { ok: true, value: { sessionId: this.session, browserVersion: version, tabId: this.tabId } };
     });
+  }
+
+  // ------------------------------------------------------------ processes
+
+  /**
+   * A profile can be open in one browser only. A pilot-browser session that hung or died
+   * leaves its browser (and often its daemon, which relaunches it) holding the profile, and
+   * every later launch exits early. Close those leftovers; never touch a session that still
+   * answers, or a browser pilot-browser didn't start.
+   */
+  private async reclaimProfile(profileDir: string): Promise<string | null> {
+    const holders = browsersForProfile(await listProcesses(), profileDir);
+    if (holders.length === 0) return null;
+    const sessions = await daemonSessions(this.env);
+    for (const holder of holders) {
+      const owner = sessions.get(holder.ppid);
+      if (owner !== undefined && isAlive(holder.ppid)) {
+        const probe = await this.runner.run(['--session', owner], ['get', 'url'], { timeoutMs: 5_000 });
+        if (probe.success) {
+          return `The profile ${profileDir} is open in another pilot-browser session (${owner}). Disconnect that session first, or use a different profile.`;
+        }
+        await terminate([holder.ppid]);
+      } else if (!/--remote-debugging-(port|pipe)/.test(holder.args)) {
+        return `The profile ${profileDir} is open in a browser pilot-browser didn't start (pid ${holder.pid}). Close that browser, then retry.`;
+      }
+    }
+    // Daemons first, so none relaunches a browser while it is being closed.
+    await terminate(browsersForProfile(await listProcesses(), profileDir).map((b) => b.pid));
+    return null;
+  }
+
+  /**
+   * Last resort for a session that no longer answers: kill its daemon, then (managed mode
+   * only) the browser it launched. An attached browser is the user's and is never touched.
+   */
+  private async killSession(): Promise<void> {
+    const daemon = await daemonPid(this.session, this.env);
+    if (daemon !== null && isAlive(daemon)) await terminate([daemon]);
+    if (this.profileDir) await terminate(browsersForProfile(await listProcesses(), this.profileDir).map((b) => b.pid));
+  }
+
+  /**
+   * agent-browser runs one command at a time, so a command that never returns blocks every
+   * later one. After a timeout, check the session still answers; if it doesn't, close it so
+   * its browser stops holding the profile, and say so plainly instead of timing out forever.
+   */
+  private async afterTimeoutLocked<T>(failure: Result<T>): Promise<Result<T>> {
+    await this.checkDialogLocked();
+    if (this.dialog) return failure;
+    const probe = await this.run(['get', 'url'], 10_000);
+    if (probe.success) return failure;
+    await this.killSession();
+    this.endLocked();
+    return fail(HUNG);
+  }
+
+  private endLocked(): void {
+    if (this.poller) clearTimeout(this.poller);
+    this.poller = null;
+    this.mode = null;
+    this.latest = null;
+    this.globalArgs = [];
+    this.tabId = '';
+    this.profileDir = null;
+    void this.removeOverlayFile();
   }
 
   // ---------------------------------------------------------------- lease
@@ -447,7 +532,7 @@ export class AgentBrowserDriver implements BrowserDriver {
       [['get', 'url'], ['get', 'title'], filter === 'all' ? ['snapshot'] : ['snapshot', '-i'], ['eval', '[innerWidth, innerHeight]'], ['eval', CAPTCHA_PROBE]],
       { timeoutMs: this.timeoutMs },
     );
-    if (!Array.isArray(page)) return envelopeError(page);
+    if (!Array.isArray(page)) return page.code === 'timeout' ? this.afterTimeoutLocked(envelopeError(page)) : envelopeError(page);
     // The CAPTCHA probe is best-effort; only the page reads must succeed.
     const failed = page.slice(0, 4).find((e) => e.error !== null);
     if (failed) return fail(toBrowserError(failed.error));
@@ -462,7 +547,7 @@ export class AgentBrowserDriver implements BrowserDriver {
 
     if (filter === 'visible' && lines.length > 0) {
       const boxes = await this.runner.batch(this.globalArgs, lines.map((l) => ['get', 'box', `@${l.ref}`]), { timeoutMs: this.timeoutMs });
-      if (!Array.isArray(boxes)) return envelopeError(boxes);
+      if (!Array.isArray(boxes)) return boxes.code === 'timeout' ? this.afterTimeoutLocked(envelopeError(boxes)) : envelopeError(boxes);
       const boxMap = new Map<string, Box>();
       boxes.forEach((entry, i) => {
         const ref = lines[i]?.ref;
@@ -528,7 +613,7 @@ export class AgentBrowserDriver implements BrowserDriver {
       if (!Array.isArray(entries)) {
         // Close the agent-input window even when the action hung, so the user's controls work again.
         if (end.length > 0) await this.runner.batch(this.globalArgs, end, { timeoutMs: 4_000 });
-        return envelopeError(entries);
+        return entries.code === 'timeout' ? this.afterTimeoutLocked(envelopeError(entries)) : envelopeError(entries);
       }
       if (entries.some((e) => e.result.dialogOpened === true)) {
         // The action opened a dialog: page scripts are frozen, so don't touch the page until it's answered.
@@ -617,13 +702,12 @@ export class AgentBrowserDriver implements BrowserDriver {
       // Take the controls off the page first, in case the tab outlives the session.
       if (this.overlay) await this.run(['eval', overlayCall(this.token, 'dispose')], 3_000);
       // Attach: close only the agent's own tab, then detach. agent-browser never closes an attached browser.
-      if (this.mode.kind === 'attach') await this.run(['tab', 'close']);
-      await this.run(['close']);
-      this.mode = null;
-      this.latest = null;
-      this.globalArgs = [];
-      this.tabId = '';
-      await this.removeOverlayFile();
+      if (this.mode.kind === 'attach') await this.run(['tab', 'close'], 10_000);
+      await this.run(['close'], 10_000);
+      // agent-browser's daemon outlives `close`, and one stuck on a command can't close at all;
+      // left running it keeps the browser (in managed mode, the profile) busy for later sessions.
+      await this.killSession();
+      this.endLocked();
     });
   }
 

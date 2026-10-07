@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureServer } from '../../../../test-fixtures/server.js';
 import { resolveAgentBrowser } from '../binary.js';
 import { AgentBrowserDriver } from '../driver.js';
+import { browsersForProfile, daemonPid, isAlive, listProcesses } from '../process.js';
 import { AgentBrowserRunner } from '../runner.js';
 
 // Real-site failure modes, reproduced with fixtures against real headless Chrome: pages that
@@ -150,4 +151,72 @@ describe.skipIf(!enabled)('orphaned overlay (real Chrome)', () => {
     await driver.control();
     expect(await driver.overlayMounted()).toBe(true);
   }, 60_000);
+});
+
+describe.skipIf(!enabled || process.platform === 'win32')('hung sessions (real Chrome)', () => {
+  // A daemon stuck on a command answers nothing, exactly like one frozen with SIGSTOP.
+  const freeze = async (driver: AgentBrowserDriver): Promise<number> => {
+    const pid = await daemonPid(driver.sessionName);
+    if (pid === null) throw new Error('no daemon pid file');
+    process.kill(pid, 'SIGSTOP');
+    return pid;
+  };
+  const browsersOn = async (profileDir: string): Promise<number> => browsersForProfile(await listProcesses(), profileDir).length;
+  let server: Awaited<ReturnType<typeof startFixtureServer>>;
+
+  beforeAll(async () => {
+    server = await startFixtureServer();
+  });
+
+  afterAll(async () => {
+    await server.close();
+  });
+
+  it('should close a session that stops answering, freeing its profile', async () => {
+    const driver = new AgentBrowserDriver({ sessionName: `pilot-hang-${process.pid}`, commandTimeoutMs: 4_000, leasePollMs: 600_000 });
+    const profileDir = await launch(driver);
+    try {
+      must(await driver.act('', { type: 'navigate', url: `${server.base}/index.html` }));
+      const daemon = await freeze(driver);
+      const result = await driver.observe();
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toContain('stopped responding');
+      expect(driver.connected).toBe(false);
+      expect(isAlive(daemon)).toBe(false);
+      expect(await browsersOn(profileDir)).toBe(0);
+    } finally {
+      await driver.disconnect();
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("should take back a profile from a hung session's browser, but not from a live one", async () => {
+    const first = new AgentBrowserDriver({ sessionName: `pilot-hold-${process.pid}`, leasePollMs: 600_000 });
+    const profileDir = await launch(first);
+    const second = new AgentBrowserDriver({ sessionName: `pilot-take-${process.pid}`, leasePollMs: 600_000 });
+    try {
+      const busy = await second.connect({ kind: 'managed', profileDir, headless: true, ...(executablePath ? { executablePath } : {}) });
+      expect(busy.ok).toBe(false);
+      if (!busy.ok) expect(busy.error.message).toContain('open in another pilot-browser session');
+
+      const daemon = await freeze(first);
+      must(await second.connect({ kind: 'managed', profileDir, headless: true, ...(executablePath ? { executablePath } : {}) }));
+      expect(isAlive(daemon)).toBe(false);
+      must(await second.act('', { type: 'navigate', url: `${server.base}/index.html` }));
+    } finally {
+      await second.disconnect();
+      await first.disconnect();
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('should leave no daemon or browser behind after disconnect', async () => {
+    const driver = new AgentBrowserDriver({ sessionName: `pilot-clean-${process.pid}`, leasePollMs: 600_000 });
+    const profileDir = await launch(driver);
+    const daemon = await daemonPid(driver.sessionName);
+    await driver.disconnect();
+    expect(daemon === null || !isAlive(daemon)).toBe(true);
+    expect(await browsersOn(profileDir)).toBe(0);
+    await rm(profileDir, { recursive: true, force: true });
+  }, 120_000);
 });

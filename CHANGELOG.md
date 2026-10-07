@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Hung browsers no longer poison later sessions.**
+  - A command that never returns used to block every later command in its session. The driver now checks after a timeout. If the session no longer answers, it closes the session's daemon and (managed mode) its browser, and reports "The browser stopped responding".
+  - `browser_disconnect` now always stops the session's agent-browser daemon. The daemon used to outlive `close`, and a stuck one kept the managed profile locked, so every later launch failed with "Chrome exited early".
+  - Managed `browser_connect` takes back a profile held by a hung or orphaned pilot-browser session. It never takes a profile from a session that still answers, or from a browser it didn't start; those get a clear error instead.
+
 ## 0.2.0 (2026-10-07)
 
 - **Approval modes:** `manual`, `supervised` (default), `auto` and `full-auto`.
